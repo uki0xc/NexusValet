@@ -1,0 +1,365 @@
+package command
+
+import (
+	"context"
+	"fmt"
+	"nexusvalet/internal/core"
+	"nexusvalet/internal/session"
+	"nexusvalet/pkg/logger"
+	"strings"
+	"sync"
+
+	"github.com/gotd/td/tg"
+)
+
+// Command 代表一个已注册的命令
+type Command struct {
+	Name        string
+	Description string
+	Handler     CommandHandler
+	Plugin      string
+}
+
+// CommandHandler 是处理命令执行的函数
+type CommandHandler func(*CommandContext) error
+
+// CommandContext 为命令执行提供上下文
+type CommandContext struct {
+	Command    string
+	Args       []string
+	Message    *core.MessageEvent
+	Session    *session.SessionContext
+	API        *tg.Client
+	Respond    func(string) error
+	ReplyTo    func(string) error
+	SendTyping func() error
+}
+
+// Parser 处理命令解析和执行
+type Parser struct {
+	commands     map[string]*Command
+	prefix       string
+	mutex        sync.RWMutex
+	dispatcher   *core.EventDispatcher
+	hookManager  *core.HookManager
+	sessionMgr   *session.Manager
+	responseFunc func(ctx context.Context, chatID int64, text string) error
+	replyFunc    func(ctx context.Context, chatID int64, messageID int, text string) error
+	typingFunc   func(ctx context.Context, chatID int64) error
+	editFunc     func(ctx context.Context, chatID int64, messageID int, text string) error
+}
+
+// NewParser 创建一个新的命令解析器
+func NewParser(prefix string, dispatcher *core.EventDispatcher, hookManager *core.HookManager) *Parser {
+	parser := &Parser{
+		commands:    make(map[string]*Command),
+		prefix:      prefix,
+		dispatcher:  dispatcher,
+		hookManager: hookManager,
+	}
+
+	// 将解析器注册为消息监听器 - 只处理发出消息（userbot 模式）
+	filter := core.ListenerFilter{
+		Outgoing: true,
+		Incoming: false,
+	}
+	dispatcher.RegisterPrefixListenerWithFilter("command_parser", prefix, parser.handleMessage, 100, filter)
+
+	logger.Infof("Command parser initialized with prefix: %s", prefix)
+	return parser
+}
+
+// SetResponseFunctions 为解析器设置响应函数
+func (p *Parser) SetResponseFunctions(
+	sessionMgr *session.Manager,
+	responseFunc func(ctx context.Context, chatID int64, text string) error,
+	replyFunc func(ctx context.Context, chatID int64, messageID int, text string) error,
+	typingFunc func(ctx context.Context, chatID int64) error,
+	editFunc func(ctx context.Context, chatID int64, messageID int, text string) error,
+) {
+	p.sessionMgr = sessionMgr
+	p.responseFunc = responseFunc
+	p.replyFunc = replyFunc
+	p.typingFunc = typingFunc
+	p.editFunc = editFunc
+}
+
+// RegisterCommand 注册一个新命令
+func (p *Parser) RegisterCommand(name, description, plugin string, handler CommandHandler) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	command := &Command{
+		Name:        name,
+		Description: description,
+		Handler:     handler,
+		Plugin:      plugin,
+	}
+
+	p.commands[name] = command
+	logger.Debugf("Registered command: %s from plugin: %s", name, plugin)
+}
+
+// UnregisterCommand 移除一个命令
+func (p *Parser) UnregisterCommand(name string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	if _, exists := p.commands[name]; exists {
+		delete(p.commands, name)
+		logger.Debugf("Unregistered command: %s", name)
+	}
+}
+
+// UnregisterPluginCommands 从特定插件中移除所有命令
+func (p *Parser) UnregisterPluginCommands(plugin string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	for name, command := range p.commands {
+		if command.Plugin == plugin {
+			delete(p.commands, name)
+			logger.Debugf("Unregistered command: %s from plugin: %s", name, plugin)
+		}
+	}
+}
+
+// GetCommand 根据名称检索命令
+func (p *Parser) GetCommand(name string) (*Command, bool) {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	command, exists := p.commands[name]
+	return command, exists
+}
+
+// GetAllCommands 返回所有已注册的命令
+func (p *Parser) GetAllCommands() map[string]*Command {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	result := make(map[string]*Command)
+	for name, command := range p.commands {
+		result[name] = command
+	}
+	return result
+}
+
+// GetCommandsByPlugin 返回来自特定插件的所有命令
+func (p *Parser) GetCommandsByPlugin(plugin string) map[string]*Command {
+	p.mutex.RLock()
+	defer p.mutex.RUnlock()
+
+	result := make(map[string]*Command)
+	for name, command := range p.commands {
+		if command.Plugin == plugin {
+			result[name] = command
+		}
+	}
+	return result
+}
+
+// handleMessage 处理以命令前缀开始的传入消息
+func (p *Parser) handleMessage(ctx context.Context, event interface{}) error {
+	msgEvent, ok := event.(*core.MessageEvent)
+	if !ok {
+		return nil
+	}
+
+	logger.Infof("Command parser received message: '%s'", msgEvent.Text)
+
+	// 检查消息是否以命令前缀开始
+	if !strings.HasPrefix(msgEvent.Text, p.prefix) {
+		logger.Debugf("Message does not start with prefix '%s'", p.prefix)
+		return nil
+	}
+
+	logger.Infof("Processing command message: '%s'", msgEvent.Text)
+
+	// 解析命令和参数
+	commandText := strings.TrimPrefix(msgEvent.Text, p.prefix)
+	parts := strings.Fields(commandText)
+	if len(parts) == 0 {
+		return nil
+	}
+
+	commandName := parts[0]
+	args := parts[1:]
+
+	// 创建命令事件
+	cmdEvent := &core.CommandEvent{
+		Command: commandName,
+		Args:    args,
+		Message: msgEvent,
+	}
+
+	// 首先分发给命令监听器
+	if err := p.dispatcher.DispatchCommand(ctx, cmdEvent); err != nil {
+		logger.Errorf("Failed to dispatch command event: %v", err)
+	}
+
+	// 如果命令存在则执行它
+	return p.executeCommand(ctx, commandName, args, msgEvent)
+}
+
+// executeCommand executes a registered command
+func (p *Parser) executeCommand(ctx context.Context, commandName string, args []string, msgEvent *core.MessageEvent) error {
+	command, exists := p.GetCommand(commandName)
+	if !exists {
+		logger.Debugf("Unknown command: %s", commandName)
+		return nil // Don't treat unknown commands as errors
+	}
+
+	// Execute BeforeCommand hooks
+	hookData := map[string]interface{}{
+		"command": commandName,
+		"args":    args,
+		"message": msgEvent,
+		"plugin":  command.Plugin,
+	}
+
+	if err := p.hookManager.ExecuteHooksWithContext(ctx, core.BeforeCommand, hookData); err != nil {
+		logger.Errorf("BeforeCommand hook failed: %v", err)
+		return err
+	}
+
+	// Get or create session
+	var sessionCtx *session.SessionContext
+	if p.sessionMgr != nil {
+		sess, err := p.sessionMgr.GetSession(msgEvent.UserID, msgEvent.ChatID)
+		if err != nil {
+			logger.Errorf("Failed to get session: %v", err)
+		} else {
+			sessionCtx = session.NewSessionContext(sess, p.sessionMgr)
+		}
+	}
+
+	// Create command context
+	cmdCtx := &CommandContext{
+		Command: commandName,
+		Args:    args,
+		Message: msgEvent,
+		Session: sessionCtx,
+		Respond: func(text string) error {
+			// Determine chat type based on Chat ID format
+			isPrivateChat := msgEvent.ChatID > 0
+
+			if isPrivateChat {
+				// Private chat: edit original message
+				if p.editFunc != nil && msgEvent.Message != nil {
+					return p.editFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
+				}
+			} else {
+				// Group chat/channel: try edit first, fallback to new message
+				if p.editFunc != nil && msgEvent.Message != nil {
+					err := p.editFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
+					if err != nil {
+						logger.Debugf("Failed to edit message (messageID=%d, chatID=%d): %v",
+							msgEvent.Message.ID, msgEvent.ChatID, err)
+
+						// Check if this is an access-related error
+						errStr := err.Error()
+						if strings.Contains(errStr, "ACCESS_HASH_INVALID") ||
+							strings.Contains(errStr, "CHANNEL_INVALID") ||
+							strings.Contains(errStr, "PEER_ID_INVALID") {
+							logger.Errorf("Access error detected for chatID=%d. Group may have changed from private to public.", msgEvent.ChatID)
+						}
+
+						// Fallback: send new message if edit fails
+						if p.responseFunc != nil {
+							logger.Infof("Falling back to sending new message")
+							return p.responseFunc(ctx, msgEvent.ChatID, text)
+						}
+						return err
+					}
+					return nil
+				}
+			}
+			return nil
+		},
+		ReplyTo: func(text string) error {
+			if p.replyFunc != nil && msgEvent.Message != nil {
+				return p.replyFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
+			}
+			return nil
+		},
+		SendTyping: func() error {
+			if p.typingFunc != nil {
+				return p.typingFunc(ctx, msgEvent.ChatID)
+			}
+			return nil
+		},
+	}
+
+	// Execute the command
+	var executeErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				executeErr = fmt.Errorf("command panicked: %v", r)
+				logger.Errorf("Command %s panicked: %v", commandName, r)
+			}
+		}()
+
+		executeErr = command.Handler(cmdCtx)
+	}()
+
+	// Execute AfterCommand hooks
+	hookData["error"] = executeErr
+	if err := p.hookManager.ExecuteHooksWithContext(ctx, core.AfterCommand, hookData); err != nil {
+		logger.Errorf("AfterCommand hook failed: %v", err)
+	}
+
+	if executeErr != nil {
+		logger.Errorf("Command %s failed: %v", commandName, executeErr)
+		return executeErr
+	}
+
+	logger.Debugf("Command %s executed successfully", commandName)
+	return nil
+}
+
+// ParseCommand parses a command string into command name and arguments
+func (p *Parser) ParseCommand(text string) (string, []string, bool) {
+	if !strings.HasPrefix(text, p.prefix) {
+		return "", nil, false
+	}
+
+	commandText := strings.TrimPrefix(text, p.prefix)
+	parts := strings.Fields(commandText)
+	if len(parts) == 0 {
+		return "", nil, false
+	}
+
+	return parts[0], parts[1:], true
+}
+
+// IsCommand checks if a text is a command
+func (p *Parser) IsCommand(text string) bool {
+	_, _, isCmd := p.ParseCommand(text)
+	return isCmd
+}
+
+// GetPrefix returns the command prefix
+func (p *Parser) GetPrefix() string {
+	return p.prefix
+}
+
+// SetPrefix sets the command prefix
+func (p *Parser) SetPrefix(prefix string) {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	oldPrefix := p.prefix
+	p.prefix = prefix
+
+	// Unregister old listener and register new one
+	p.dispatcher.UnregisterListener(core.MessageListener, "command_parser")
+	filter := core.ListenerFilter{
+		Outgoing: true,
+		Incoming: false,
+	}
+	p.dispatcher.RegisterPrefixListenerWithFilter("command_parser", prefix, p.handleMessage, 100, filter)
+
+	logger.Debugf("Command prefix changed from %s to %s", oldPrefix, prefix)
+}

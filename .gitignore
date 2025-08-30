@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# Configuration files (contains sensitive API credentials)
+config.json
+
+# Session files
+session.json
+sessions.db
+
+# Build files
+nexusvalet
