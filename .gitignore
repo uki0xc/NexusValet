@@ -33,6 +33,3 @@ config.json
 # Session files
 session.json
 sessions.db
-
-# Build files
-nexusvalet
