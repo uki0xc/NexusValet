@@ -124,6 +124,9 @@ func (b *Bot) createTelegramClient() error {
 	b.client = client
 	b.api = client.API()
 
+	// Set the Telegram API for the command parser to enable file operations
+	b.commandParser.SetTelegramAPI(b.api)
+
 	return nil
 }
 

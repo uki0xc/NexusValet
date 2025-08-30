@@ -3,14 +3,25 @@ package command
 import (
 	"context"
 	"fmt"
+
 	"nexusvalet/internal/core"
 	"nexusvalet/internal/session"
 	"nexusvalet/pkg/logger"
 	"strings"
 	"sync"
 
+	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 )
+
+// writerFunc is a helper type to implement io.Writer
+type writerFunc struct {
+	fn func(string) (int, error)
+}
+
+func (w *writerFunc) Write(p []byte) (int, error) {
+	return w.fn(string(p))
+}
 
 // Command 代表一个已注册的命令
 type Command struct {
@@ -25,14 +36,16 @@ type CommandHandler func(*CommandContext) error
 
 // CommandContext 为命令执行提供上下文
 type CommandContext struct {
-	Command    string
-	Args       []string
-	Message    *core.MessageEvent
-	Session    *session.SessionContext
-	API        *tg.Client
-	Respond    func(string) error
-	ReplyTo    func(string) error
-	SendTyping func() error
+	Command      string
+	Args         []string
+	Message      *core.MessageEvent
+	Session      *session.SessionContext
+	API          *tg.Client
+	Respond      func(string) error
+	ReplyTo      func(string) error
+	SendTyping   func() error
+	DownloadFile func(document *tg.Document) ([]byte, error)
+	GetDocument  func() (*tg.Document, error)
 }
 
 // Parser 处理命令解析和执行
@@ -43,6 +56,7 @@ type Parser struct {
 	dispatcher   *core.EventDispatcher
 	hookManager  *core.HookManager
 	sessionMgr   *session.Manager
+	telegramAPI  *tg.Client
 	responseFunc func(ctx context.Context, chatID int64, text string) error
 	replyFunc    func(ctx context.Context, chatID int64, messageID int, text string) error
 	typingFunc   func(ctx context.Context, chatID int64) error
@@ -82,6 +96,11 @@ func (p *Parser) SetResponseFunctions(
 	p.replyFunc = replyFunc
 	p.typingFunc = typingFunc
 	p.editFunc = editFunc
+}
+
+// SetTelegramAPI 设置 Telegram API 客户端
+func (p *Parser) SetTelegramAPI(api *tg.Client) {
+	p.telegramAPI = api
 }
 
 // RegisterCommand 注册一个新命令
@@ -240,6 +259,7 @@ func (p *Parser) executeCommand(ctx context.Context, commandName string, args []
 		Args:    args,
 		Message: msgEvent,
 		Session: sessionCtx,
+		API:     p.telegramAPI,
 		Respond: func(text string) error {
 			// Determine chat type based on Chat ID format
 			isPrivateChat := msgEvent.ChatID > 0
@@ -288,6 +308,87 @@ func (p *Parser) executeCommand(ctx context.Context, commandName string, args []
 				return p.typingFunc(ctx, msgEvent.ChatID)
 			}
 			return nil
+		},
+		GetDocument: func() (*tg.Document, error) {
+			// First, check if the current message has media
+			if msgEvent.Message != nil && msgEvent.Message.Media != nil {
+				switch media := msgEvent.Message.Media.(type) {
+				case *tg.MessageMediaDocument:
+					if doc, ok := media.Document.(*tg.Document); ok {
+						return doc, nil
+					}
+				}
+			}
+
+			// If no media in current message, check if this message is replying to a message with media
+			if msgEvent.Message != nil && msgEvent.Message.ReplyTo != nil {
+				if replyToMsg, ok := msgEvent.Message.ReplyTo.(*tg.MessageReplyHeader); ok {
+					logger.Debugf("Message is replying to message ID %d, checking for media", replyToMsg.ReplyToMsgID)
+
+					// Try to get the replied message from Telegram API
+					if p.telegramAPI != nil {
+						// Get the message using the message ID
+						resp, err := p.telegramAPI.MessagesGetMessages(ctx, []tg.InputMessageClass{
+							&tg.InputMessageID{ID: replyToMsg.ReplyToMsgID},
+						})
+						if err != nil {
+							logger.Errorf("Failed to get replied message: %v", err)
+							return nil, fmt.Errorf("failed to get replied message: %w", err)
+						}
+
+						// Check if we got a valid response
+						if messages, ok := resp.(*tg.MessagesMessages); ok && len(messages.Messages) > 0 {
+							if repliedMsg, ok := messages.Messages[0].(*tg.Message); ok && repliedMsg.Media != nil {
+								switch media := repliedMsg.Media.(type) {
+								case *tg.MessageMediaDocument:
+									if doc, ok := media.Document.(*tg.Document); ok {
+										logger.Debugf("Found document in replied message")
+										return doc, nil
+									}
+								}
+							}
+						} else if channelMessages, ok := resp.(*tg.MessagesChannelMessages); ok && len(channelMessages.Messages) > 0 {
+							if repliedMsg, ok := channelMessages.Messages[0].(*tg.Message); ok && repliedMsg.Media != nil {
+								switch media := repliedMsg.Media.(type) {
+								case *tg.MessageMediaDocument:
+									if doc, ok := media.Document.(*tg.Document); ok {
+										logger.Debugf("Found document in replied channel message")
+										return doc, nil
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			return nil, fmt.Errorf("no document found in message or replied message")
+		},
+		DownloadFile: func(document *tg.Document) ([]byte, error) {
+			if p.telegramAPI == nil {
+				return nil, fmt.Errorf("telegram API client not available")
+			}
+
+			// Create downloader
+			d := downloader.NewDownloader()
+
+			// Create a buffer to store the downloaded data
+			buf := &strings.Builder{}
+
+			// Download the file to the buffer
+			_, err := d.Download(p.telegramAPI, &tg.InputDocumentFileLocation{
+				ID:            document.ID,
+				AccessHash:    document.AccessHash,
+				FileReference: document.FileReference,
+			}).Stream(ctx, &writerFunc{fn: func(s string) (int, error) {
+				return buf.WriteString(s)
+			}})
+
+			if err != nil {
+				return nil, fmt.Errorf("failed to download file: %w", err)
+			}
+
+			return []byte(buf.String()), nil
 		},
 	}
 

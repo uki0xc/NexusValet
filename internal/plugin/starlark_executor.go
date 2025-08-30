@@ -6,7 +6,9 @@ import (
 	"nexusvalet/internal/command"
 	"nexusvalet/internal/core"
 	"nexusvalet/pkg/logger"
+	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"go.starlark.net/starlark"
@@ -93,6 +95,8 @@ func (se *StarlarkExecutor) createPredeclaredEnvironment(pluginInfo *PluginInfo)
 		"get_memory_info":   starlark.NewBuiltin("get_memory_info", se.makeGetMemoryInfo()),
 		"get_runtime_info":  starlark.NewBuiltin("get_runtime_info", se.makeGetRuntimeInfo()),
 		"get_plugin_info":   starlark.NewBuiltin("get_plugin_info", se.makeGetPluginInfo()),
+		"get_kernel_info":   starlark.NewBuiltin("get_kernel_info", se.makeGetKernelInfo()),
+		"exec_command":      starlark.NewBuiltin("exec_command", se.makeExecCommand()),
 	})
 
 	return starlark.StringDict{
@@ -327,6 +331,115 @@ func (se *StarlarkExecutor) makeGetPluginInfo() func(thread *starlark.Thread, fn
 			"loaded_count":   starlark.MakeInt(pluginCount),
 			"system_version": starlark.String("1.0.0"),
 		}), nil
+	}
+}
+
+func (se *StarlarkExecutor) makeGetKernelInfo() func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		kernelVersion := "N/A"
+		kernelName := "Unknown"
+
+		// Try to get kernel version based on OS
+		switch runtime.GOOS {
+		case "linux":
+			// Try uname -r for kernel version
+			if cmd := exec.Command("uname", "-r"); cmd != nil {
+				if output, err := cmd.Output(); err == nil {
+					kernelVersion = strings.TrimSpace(string(output))
+				}
+			}
+			// Try uname -s for kernel name
+			if cmd := exec.Command("uname", "-s"); cmd != nil {
+				if output, err := cmd.Output(); err == nil {
+					kernelName = strings.TrimSpace(string(output))
+				}
+			}
+		case "darwin":
+			// macOS - get kernel version
+			if cmd := exec.Command("uname", "-r"); cmd != nil {
+				if output, err := cmd.Output(); err == nil {
+					kernelVersion = strings.TrimSpace(string(output))
+				}
+			}
+			kernelName = "Darwin"
+		case "windows":
+			// Windows - get version info
+			if cmd := exec.Command("cmd", "/C", "ver"); cmd != nil {
+				if output, err := cmd.Output(); err == nil {
+					kernelVersion = strings.TrimSpace(string(output))
+				}
+			}
+			kernelName = "Windows NT"
+		case "freebsd":
+			if cmd := exec.Command("uname", "-r"); cmd != nil {
+				if output, err := cmd.Output(); err == nil {
+					kernelVersion = strings.TrimSpace(string(output))
+				}
+			}
+			kernelName = "FreeBSD"
+		}
+
+		return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
+			"version": starlark.String(kernelVersion),
+			"name":    starlark.String(kernelName),
+			"os":      starlark.String(runtime.GOOS),
+		}), nil
+	}
+}
+
+func (se *StarlarkExecutor) makeExecCommand() func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+	return func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
+		var command string
+		var cmdArgs starlark.Value
+		var timeout int64 = 30 // default 30 seconds timeout
+
+		if err := starlark.UnpackArgs("exec_command", args, kwargs, "command", &command, "args?", &cmdArgs, "timeout?", &timeout); err != nil {
+			return nil, err
+		}
+
+		// Convert starlark args to string slice
+		var argsList []string
+		if cmdArgs != nil {
+			if list, ok := cmdArgs.(*starlark.List); ok {
+				for i := 0; i < list.Len(); i++ {
+					if str, ok := list.Index(i).(starlark.String); ok {
+						argsList = append(argsList, string(str))
+					}
+				}
+			}
+		}
+
+		// Create command with timeout
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+		defer cancel()
+
+		var cmd *exec.Cmd
+		if len(argsList) > 0 {
+			cmd = exec.CommandContext(ctx, command, argsList...)
+		} else {
+			cmd = exec.CommandContext(ctx, command)
+		}
+
+		// Execute command
+		output, err := cmd.CombinedOutput()
+
+		// Create result structure
+		resultDict := starlark.StringDict{
+			"success": starlark.Bool(err == nil),
+			"output":  starlark.String(string(output)),
+		}
+
+		if err != nil {
+			resultDict["error"] = starlark.String(err.Error())
+			resultDict["exit_code"] = starlark.MakeInt(-1)
+		} else if cmd.ProcessState != nil {
+			resultDict["exit_code"] = starlark.MakeInt(cmd.ProcessState.ExitCode())
+		} else {
+			resultDict["exit_code"] = starlark.MakeInt(0)
+		}
+
+		result := starlarkstruct.FromStringDict(starlarkstruct.Default, resultDict)
+		return result, nil
 	}
 }
 

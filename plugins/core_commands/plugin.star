@@ -19,6 +19,39 @@ def init():
         description="显示帮助信息"
     )
 
+def format_uptime(uptime_seconds):
+    """Format uptime in a human-readable way"""
+    days = uptime_seconds // 86400
+    hours = (uptime_seconds % 86400) // 3600
+    minutes = (uptime_seconds % 3600) // 60
+    seconds = uptime_seconds % 60
+    
+    parts = []
+    if days > 0:
+        parts.append(str(days) + "天")
+    if hours > 0:
+        parts.append(str(hours) + "小时")
+    if minutes > 0:
+        parts.append(str(minutes) + "分钟")
+    if seconds > 0 or len(parts) == 0:
+        parts.append(str(seconds) + "秒")
+    
+    return " ".join(parts)
+
+def format_memory_size(bytes_size):
+    """Format memory size in human-readable format"""
+    if bytes_size >= 1024 * 1024 * 1024:  # GB
+        size = int(bytes_size / (1024 * 1024 * 1024) * 100) / 100.0
+        return str(size) + " GB"
+    elif bytes_size >= 1024 * 1024:  # MB
+        size = int(bytes_size / (1024 * 1024) * 100) / 100.0
+        return str(size) + " MB"
+    elif bytes_size >= 1024:  # KB
+        size = int(bytes_size / 1024 * 100) / 100.0
+        return str(size) + " KB"
+    else:
+        return str(bytes_size) + " B"
+
 def handle_status(ctx):
     """Handle .status command"""
     # Get system information
@@ -28,35 +61,39 @@ def handle_status(ctx):
     memory_info = bot.get_memory_info()
     runtime_info = bot.get_runtime_info()
     plugin_info = bot.get_plugin_info()
+    kernel_info = bot.get_kernel_info()
+    current_time = bot.get_time()
     
     # Format uptime
-    uptime_seconds = runtime_info.uptime
-    uptime_minutes = uptime_seconds // 60
-    uptime_secs = uptime_seconds % 60
-    uptime_str = str(uptime_minutes) + "分钟 " + str(uptime_secs) + "秒"
+    uptime_str = format_uptime(runtime_info.uptime)
     
-    # Format memory (convert bytes to MB, rounded)
-    alloc_mb = int(memory_info.alloc / (1024 * 1024) * 100) / 100.0
-    sys_mb = int(memory_info.sys / (1024 * 1024) * 100) / 100.0
+    # Format memory sizes
+    alloc_str = format_memory_size(memory_info.alloc)
+    sys_str = format_memory_size(memory_info.sys)
+    
+    # Get kernel version - safely access the version attribute
+    kernel_version = "N/A"
+    if kernel_info and kernel_info.version:
+        kernel_version = str(kernel_info.version)
     
     # Build status message
-    status_msg = """🤖 NexusValet 状态报告
+    status_msg = """NexusValet 状态报告
 
-**运行时间**: """ + uptime_str + """
-**系统信息**:
+运行时间: """ + uptime_str + """
+系统信息:
    • Go版本: """ + str(go_version) + """
    • 系统: """ + str(system_info.os) + "/" + str(system_info.arch) + """
-   • CPU核心: """ + str(system_info.cpu_count) + """
-   • Goroutines: """ + str(runtime_info.goroutines) + """
+   • Kernel 版本: """ + kernel_version + """
+   • NexusValet版本: """ + str(version) + """
 
-**内存使用**:
-   • 已分配: """ + str(alloc_mb) + """ MB
-   • 系统占用: """ + str(sys_mb) + """ MB
-   • GC次数: """ + str(memory_info.gc_count) + """
+内存使用:
+   • 已分配: """ + alloc_str + """
+   • 系统占用: """ + sys_str + """
 
-**插件状态**:
+插件状态:
    • 已加载插件: """ + str(plugin_info.loaded_count) + """ 个
-   • 系统插件版本: """ + str(plugin_info.system_version)
+
+状态检查时间: """ + str(current_time)
     
     ctx.respond(status_msg)
 
@@ -105,6 +142,6 @@ def handle_help(ctx):
             
             ctx.respond(detailed_help)
         else:
-            ctx.respond("❌ 未找到该插件的帮助信息: " + plugin_name)
+            ctx.respond("未找到该插件的帮助信息: " + plugin_name)
     else:
-        ctx.respond("❌ .help 命令参数过多。用法: .help [插件名]")
+        ctx.respond(".help 命令参数过多。用法: .help [插件名]")
