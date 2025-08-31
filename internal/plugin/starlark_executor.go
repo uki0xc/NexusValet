@@ -448,6 +448,7 @@ func (se *StarlarkExecutor) createCommandContext(ctx *command.CommandContext) st
 	return starlarkstruct.FromStringDict(starlarkstruct.Default, starlark.StringDict{
 		"command": starlark.String(ctx.Command),
 		"args":    se.convertStringSlice(ctx.Args),
+		"message": se.createEventContext(ctx.Message),
 		"respond": starlark.NewBuiltin("respond", func(thread *starlark.Thread, fn *starlark.Builtin, args starlark.Tuple, kwargs []starlark.Tuple) (starlark.Value, error) {
 			var message string
 			if err := starlark.UnpackArgs("respond", args, kwargs, "message", &message); err != nil {
