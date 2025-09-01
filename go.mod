@@ -4,8 +4,8 @@ go 1.25.0
 
 require (
 	github.com/gotd/td v0.130.0
-	go.starlark.net v0.0.0-20250826212936-2a4f36945129
 	modernc.org/sqlite v1.38.2
+	github.com/yuin/gopher-lua v1.1.1
 )
 
 require (
@@ -29,6 +29,7 @@ require (
 	github.com/ogen-go/ogen v1.14.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect
