@@ -7,7 +7,7 @@ import (
 	"nexusvalet/pkg/logger"
 	"sync"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // Session represents a user session
@@ -26,7 +26,7 @@ type Manager struct {
 
 // NewManager creates a new session manager
 func NewManager(dbPath string) (*Manager, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
