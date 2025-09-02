@@ -103,6 +103,11 @@ func (p *Parser) SetTelegramAPI(api *tg.Client) {
 	p.telegramAPI = api
 }
 
+// GetTelegramAPI 返回 Telegram API 客户端实例
+func (p *Parser) GetTelegramAPI() *tg.Client {
+	return p.telegramAPI
+}
+
 // RegisterCommand 注册一个新命令
 func (p *Parser) RegisterCommand(name, description, plugin string, handler CommandHandler) {
 	p.mutex.Lock()

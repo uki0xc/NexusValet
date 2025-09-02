@@ -68,6 +68,18 @@ function handle_status(ctx)
     local kernel_info = bot.get_kernel_info()
     local current_time = bot.get_time()
 
+
+    local self_info, err = bot.get_self_user()
+    local account_line = "未获取到帐号信息"
+    if self_info then
+        local uname = self_info.username and ("@" .. self_info.username) or "(无用户名)"
+        local uid = self_info.id or 0
+        account_line = string.format("%s (ID: %d)", uname, uid)
+    elseif err then
+        account_line = "获取帐号失败: " .. tostring(err)
+    end
+
+
     -- Format uptime
     local uptime_str = format_uptime(runtime_info.uptime)
 
@@ -90,6 +102,7 @@ function handle_status(ctx)
    • 系统: %s/%s
    • Kernel 版本: %s
    • NexusValet版本: %s
+   • 当前账号: %s
 
 内存使用:
    • 已分配: %s
@@ -98,7 +111,7 @@ function handle_status(ctx)
 插件状态:
    • 已加载插件: %d 个
 
-状态检查时间: %s]], uptime_str, go_version, system_info.os, system_info.arch, kernel_version, version, alloc_str, sys_str, plugin_info.loaded_count, current_time)
+状态检查时间: %s]], uptime_str, go_version, system_info.os, system_info.arch, kernel_version, version, account_line, alloc_str, sys_str, plugin_info.loaded_count, current_time)
 
     ctx.respond(status_msg)
 end

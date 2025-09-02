@@ -7,6 +7,7 @@ import (
 	"nexusvalet/internal/command"
 	"nexusvalet/internal/config"
 	"nexusvalet/internal/core"
+	"nexusvalet/internal/peers"
 	"nexusvalet/internal/plugin"
 	"nexusvalet/internal/session"
 	"nexusvalet/pkg/logger"
@@ -35,6 +36,7 @@ type Bot struct {
 	cancel        context.CancelFunc
 	currentPeer   tg.InputPeerClass // 存储当前对等体用于回复
 	selfUserID    int64             // 机器人自己的用户ID
+	peerResolver  *peers.Resolver
 	// 存储最后处理的消息用于编辑上下文
 	lastMessage *tg.Message
 	lastUpdate  interface{} // 存储原始更新
@@ -124,6 +126,9 @@ func (b *Bot) createTelegramClient() error {
 	b.client = client
 	b.api = client.API()
 
+	// 初始化统一的 Peer 解析器
+	b.peerResolver = peers.NewResolver(b.api)
+
 	// Set the Telegram API for the command parser to enable file operations
 	b.commandParser.SetTelegramAPI(b.api)
 
@@ -138,7 +143,7 @@ func (b *Bot) Start() error {
 	if err := b.hookManager.ExecuteHooks(core.BeforeStart, map[string]interface{}{
 		"version": "v1.0.0",
 	}); err != nil {
-		return fmt.Errorf("BeforeStart hooks failed: %w", err)
+		return fmt.Errorf("beforeStart hooks failed: %w", err)
 	}
 
 	// 加载所有插件
@@ -173,7 +178,7 @@ func (b *Bot) Start() error {
 		<-ctx.Done()
 		return ctx.Err()
 	}); err != nil {
-		return fmt.Errorf("Telegram client failed: %w", err)
+		return fmt.Errorf("telegram client failed: %w", err)
 	}
 
 	return nil
@@ -370,46 +375,13 @@ func (b *Bot) handleNewChannelMessage(ctx context.Context, update *tg.UpdateNewC
 	return b.handleNewMessage(ctx, newMessageUpdate)
 }
 
-// sendMessage 使用存储的对等体信息向聊天发送文本消息
+// sendMessage 使用统一解析器解析对等体后发送文本消息
 func (b *Bot) sendMessage(ctx context.Context, chatID int64, text string) error {
-	// 根据聊天ID格式创建适当的对等体
-	var peer tg.InputPeerClass
-
-	if chatID > 0 {
-		// 用户 ID: 正整数 - 私聊
-		peer = &tg.InputPeerUser{UserID: chatID}
-	} else if chatID > -1000000000000 {
-		// 普通群组 ID: 负整数 (e.g., -123456789)
-		peer = &tg.InputPeerChat{ChatID: -chatID}
-	} else {
-		// 超级群组和频道 ID: 以 -100 开头的长负整数 (e.g., -1001234567890)
-		channelID := -chatID - 1000000000000
-		logger.Debugf("Supergroup/Channel detected: chatID=%d, channelID=%d", chatID, channelID)
-
-		// 对于超级群组/频道，如果可用，尝试使用存储的 currentPeer
-		if b.currentPeer != nil {
-			if channelPeer, ok := b.currentPeer.(*tg.InputPeerChannel); ok {
-				logger.Debugf("Using stored InputPeerChannel from currentPeer")
-				peer = channelPeer
-			} else {
-				logger.Debugf("Creating InputPeerChannel for supergroup")
-				peer = &tg.InputPeerChannel{
-					ChannelID:  channelID,
-					AccessHash: 0,
-				}
-			}
-		} else {
-			logger.Debugf("No currentPeer available, creating InputPeerChannel")
-			peer = &tg.InputPeerChannel{
-				ChannelID:  channelID,
-				AccessHash: 0,
-			}
-		}
+	peer, err := b.peerResolver.ResolveFromChatID(ctx, chatID)
+	if err != nil {
+		return err
 	}
-
-	logger.Debugf("Sending message to chatID=%d with peer type %T", chatID, peer)
-
-	_, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	_, err = b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  text,
 		RandomID: time.Now().UnixNano(),
@@ -419,42 +391,11 @@ func (b *Bot) sendMessage(ctx context.Context, chatID int64, text string) error 
 
 // replyToMessage 回复特定消息
 func (b *Bot) replyToMessage(ctx context.Context, chatID int64, messageID int, text string) error {
-	// 根据聊天ID格式创建适当的对等体
-	var peer tg.InputPeerClass
-
-	if chatID > 0 {
-		// 用户 ID: 正整数 - 私聊
-		peer = &tg.InputPeerUser{UserID: chatID}
-	} else if chatID > -1000000000000 {
-		// 普通群组 ID: 负整数 (e.g., -123456789)
-		peer = &tg.InputPeerChat{ChatID: -chatID}
-	} else {
-		// 超级群组和频道 ID: 以 -100 开头的长负整数 (e.g., -1001234567890)
-		channelID := -chatID - 1000000000000
-		logger.Debugf("Supergroup/Channel reply detected: chatID=%d, channelID=%d", chatID, channelID)
-
-		// 对于超级群组/频道，如果可用，尝试使用存储的 currentPeer
-		if b.currentPeer != nil {
-			if channelPeer, ok := b.currentPeer.(*tg.InputPeerChannel); ok {
-				logger.Debugf("Using stored InputPeerChannel from currentPeer for reply")
-				peer = channelPeer
-			} else {
-				logger.Debugf("Creating InputPeerChannel for supergroup reply")
-				peer = &tg.InputPeerChannel{
-					ChannelID:  channelID,
-					AccessHash: 0,
-				}
-			}
-		} else {
-			logger.Debugf("No currentPeer available, creating InputPeerChannel for reply")
-			peer = &tg.InputPeerChannel{
-				ChannelID:  channelID,
-				AccessHash: 0,
-			}
-		}
+	peer, err := b.peerResolver.ResolveFromChatID(ctx, chatID)
+	if err != nil {
+		return err
 	}
-
-	_, err := b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+	_, err = b.api.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
 		Peer:     peer,
 		Message:  text,
 		ReplyTo:  &tg.InputReplyToMessage{ReplyToMsgID: messageID},
@@ -465,42 +406,11 @@ func (b *Bot) replyToMessage(ctx context.Context, chatID int64, messageID int, t
 
 // sendTyping 发送打字动作
 func (b *Bot) sendTyping(ctx context.Context, chatID int64) error {
-	// 根据聊天ID格式创建适当的对等体
-	var peer tg.InputPeerClass
-
-	if chatID > 0 {
-		// 用户 ID: 正整数 - 私聊
-		peer = &tg.InputPeerUser{UserID: chatID}
-	} else if chatID > -1000000000000 {
-		// 普通群组 ID: 负整数 (e.g., -123456789)
-		peer = &tg.InputPeerChat{ChatID: -chatID}
-	} else {
-		// 超级群组和频道 ID: 以 -100 开头的长负整数 (e.g., -1001234567890)
-		channelID := -chatID - 1000000000000
-		logger.Debugf("Supergroup/Channel typing detected: chatID=%d, channelID=%d", chatID, channelID)
-
-		// 对于超级群组/频道，如果可用，尝试使用存储的 currentPeer
-		if b.currentPeer != nil {
-			if channelPeer, ok := b.currentPeer.(*tg.InputPeerChannel); ok {
-				logger.Debugf("Using stored InputPeerChannel from currentPeer for typing")
-				peer = channelPeer
-			} else {
-				logger.Debugf("Creating InputPeerChannel for supergroup typing")
-				peer = &tg.InputPeerChannel{
-					ChannelID:  channelID,
-					AccessHash: 0,
-				}
-			}
-		} else {
-			logger.Debugf("No currentPeer available, creating InputPeerChannel for typing")
-			peer = &tg.InputPeerChannel{
-				ChannelID:  channelID,
-				AccessHash: 0,
-			}
-		}
+	peer, err := b.peerResolver.ResolveFromChatID(ctx, chatID)
+	if err != nil {
+		return err
 	}
-
-	_, err := b.api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
+	_, err = b.api.MessagesSetTyping(ctx, &tg.MessagesSetTypingRequest{
 		Peer:   peer,
 		Action: &tg.SendMessageTypingAction{},
 	})

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/tg"
 	lua "github.com/yuin/gopher-lua"
 )
 
@@ -95,6 +96,7 @@ func (le *LuaExecutor) createBotAPITable(pluginInfo *PluginInfo) *lua.LTable {
 	botAPI.RawSetString("get_plugin_info", pluginInfo.L.NewFunction(le.makeGetPluginInfo()))
 	botAPI.RawSetString("get_kernel_info", pluginInfo.L.NewFunction(le.makeGetKernelInfo()))
 	botAPI.RawSetString("exec_command", pluginInfo.L.NewFunction(le.makeExecCommand()))
+	botAPI.RawSetString("get_self_user", pluginInfo.L.NewFunction(le.makeBotGetSelfUser()))
 
 	// ===================== 新增 JSON 函数 =====================
 	jsonModule := pluginInfo.L.NewTable()
@@ -103,7 +105,83 @@ func (le *LuaExecutor) createBotAPITable(pluginInfo *PluginInfo) *lua.LTable {
 	pluginInfo.L.SetGlobal("json", jsonModule)
 	// =======================================================
 
+	// ===================== Telegram 模块 =====================
+	telegramModule := pluginInfo.L.NewTable()
+	telegramModule.RawSetString("get_self", pluginInfo.L.NewFunction(le.makeTelegramGetSelf()))
+	pluginInfo.L.SetGlobal("telegram", telegramModule)
+	// =======================================================
+
 	return botAPI
+}
+
+// makeTelegramGetSelf 暴露 telegram.get_self()
+func (le *LuaExecutor) makeTelegramGetSelf() lua.LGFunction {
+	return func(L *lua.LState) int {
+		if le.parser == nil || le.parser.GetTelegramAPI() == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("telegram api not available"))
+			return 2
+		}
+		api := le.parser.GetTelegramAPI()
+		ctx := context.Background()
+		users, err := api.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUserSelf{}})
+		if err != nil || len(users) == 0 {
+			L.Push(lua.LNil)
+			if err != nil {
+				L.Push(lua.LString(err.Error()))
+			} else {
+				L.Push(lua.LString("empty users response"))
+			}
+			return 2
+		}
+		if u, ok := users[0].(*tg.User); ok {
+			tbl := L.NewTable()
+			if u.Username != "" {
+				tbl.RawSetString("username", lua.LString(u.Username))
+			}
+			tbl.RawSetString("id", lua.LNumber(u.ID))
+			L.Push(tbl)
+			return 1
+		}
+		L.Push(lua.LNil)
+		L.Push(lua.LString("unexpected user type"))
+		return 2
+	}
+}
+
+// makeBotGetSelfUser 暴露 bot.get_self_user()（与 telegram.get_self 等价）
+func (le *LuaExecutor) makeBotGetSelfUser() lua.LGFunction {
+	return func(L *lua.LState) int {
+		if le.parser == nil || le.parser.GetTelegramAPI() == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("telegram api not available"))
+			return 2
+		}
+		api := le.parser.GetTelegramAPI()
+		ctx := context.Background()
+		users, err := api.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUserSelf{}})
+		if err != nil || len(users) == 0 {
+			L.Push(lua.LNil)
+			if err != nil {
+				L.Push(lua.LString(err.Error()))
+			} else {
+				L.Push(lua.LString("empty users response"))
+			}
+			return 2
+		}
+		if u, ok := users[0].(*tg.User); ok {
+			tbl := L.NewTable()
+			if u.Username != "" {
+				tbl.RawSetString("username", lua.LString(u.Username))
+			}
+			tbl.RawSetString("id", lua.LNumber(u.ID))
+			L.Push(tbl)
+			return 1
+		}
+		L.Push(lua.LNil)
+		L.Push(lua.LString("unexpected user type"))
+		return 2
+	}
 }
 
 // makeRegisterCommand 创建 register_command 内置函数
