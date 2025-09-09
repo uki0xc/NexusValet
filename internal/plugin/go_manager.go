@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"nexusvalet/internal/command"
 	"nexusvalet/internal/core"
+	"nexusvalet/internal/peers"
 	"nexusvalet/pkg/logger"
 	"sync"
 
@@ -14,12 +15,13 @@ import (
 
 // GoManager 管理Go插件的加载、卸载和执行
 type GoManager struct {
-	plugins     map[string]Plugin
-	parser      *command.Parser
-	dispatcher  *core.EventDispatcher
-	hookManager *core.HookManager
-	db          *sql.DB
-	mutex       sync.RWMutex
+	plugins      map[string]Plugin
+	parser       *command.Parser
+	dispatcher   *core.EventDispatcher
+	hookManager  *core.HookManager
+	db           *sql.DB
+	peerResolver *peers.Resolver
+	mutex        sync.RWMutex
 }
 
 // NewGoManager 创建一个新的Go插件管理器
@@ -213,6 +215,11 @@ func (gm *GoManager) GetDatabase() *sql.DB {
 	return gm.db
 }
 
+// SetPeerResolver 设置Peer解析器
+func (gm *GoManager) SetPeerResolver(peerResolver *peers.Resolver) {
+	gm.peerResolver = peerResolver
+}
+
 // SetTelegramClient 为所有支持的插件设置Telegram客户端
 func (gm *GoManager) SetTelegramClient(client *tg.Client) {
 	gm.mutex.RLock()
@@ -228,6 +235,14 @@ func (gm *GoManager) SetTelegramClient(client *tg.Client) {
 		if sbPlugin, ok := plugin.(*SBPlugin); ok {
 			sbPlugin.SetTelegramClient(client)
 			logger.Debugf("Set Telegram client for SB plugin %s", name)
+		}
+		// 检查插件是否是AutoSendPlugin类型
+		if autoSendPlugin, ok := plugin.(*AutoSendPlugin); ok {
+			// 需要peer resolver
+			if gm.peerResolver != nil {
+				autoSendPlugin.SetTelegramClient(client, gm.peerResolver)
+				logger.Debugf("Set Telegram client for AutoSend plugin %s", name)
+			}
 		}
 	}
 }

@@ -162,7 +162,8 @@ func (b *Bot) Start() error {
 			}
 		}
 
-		// 为插件设置Telegram客户端
+		// 为插件设置Peer解析器和Telegram客户端
+		b.pluginManager.SetPeerResolver(b.peerResolver)
 		b.pluginManager.SetTelegramClient(b.api)
 
 		// 执行 AfterStart 钩子

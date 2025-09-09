@@ -205,8 +205,10 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 • .sb [用户ID/用户名] [不删除消息] - 超级封禁用户并删除消息历史
 • .gemini <问题> - Gemini AI智能问答(自动识别文本/图片)
 • .gm <问题> - Gemini简写命令
+• .autosend <命令> - 基于cron表达式的定时发送
+• .as <命令> - autosend简写命令
 
-💡 提示: 使用 .help core 或 .help sb 查看详细信息
+💡 提示: 使用 .help core 或 .help autosend 查看详细信息
 🚀 新版本: 现在使用Go插件系统，性能更佳！`
 
 		// 直接使用gotd API发送响应
@@ -402,6 +404,83 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
 					Peer:     peer,
 					Message:  geminiHelp,
+					RandomID: time.Now().UnixNano(),
+				})
+			}
+			return err
+		}
+	} else if pluginName == "autosend" {
+		autoSendHelp := `🤖 AutoSend 定时发送插件详细帮助
+
+📝 基本命令:
+  • .autosend add <秒> <分> <时> <日> <月> <周> <消息内容> - 创建定时发送任务
+  • .autosend list - 列出所有任务
+  • .autosend remove <ID> - 删除任务
+  • .autosend enable <ID> - 启用任务
+  • .autosend disable <ID> - 禁用任务
+
+📋 Cron表达式格式: 秒 分 时 日 月 周
+  • 每天0点: 0 0 0 * * *
+  • 每天12:30: 0 30 12 * * *
+  • 每10分钟: 0 */10 * * * *
+  • 每小时: 0 0 * * * *
+  • 工作日9点: 0 0 9 * * 1-5
+  • 每周日22点: 0 0 22 * * 0
+
+📋 使用示例:
+  • .autosend add 0 0 0 * * * 🌅 新的一天开始了！
+  • .autosend add 0 30 12 * * * 🍽️ 午餐时间到了！
+  • .autosend add 0 0 22 * * * 🌙 该休息了，晚安~
+  • .as add 0 */30 * * * * 📊 半小时状态检查
+  • .autosend add 0 0 9 * * 1-5 ☕ 工作日早安！
+  • .autosend add 0 0 18 * * 1-5 🏠 下班时间到了！
+  • .autosend list - 查看所有任务
+  • .autosend remove 1 - 删除ID为1的任务
+
+✨ 特色功能:
+  • 使用强大的cron表达式，支持复杂定时规则
+  • 支持秒级精度的定时任务
+  • 完全自定义消息内容，支持emoji表情 🎉
+  • 支持多行文本和特殊字符
+  • 可用于工作提醒、生活助手、娱乐互动等
+
+⚠️ 注意事项:
+  • 使用标准cron表达式，支持秒级精度
+  • 无需使用引号，直接输入6个字段
+  • 消息内容完全由您自定义
+  • 任务会在当前聊天中执行
+  • 重启后任务会自动恢复
+  • 使用.as作为简写命令
+
+🔌 插件信息:
+  • 名称: autosend
+  • 版本: v1.0.0
+  • 作者: NexusValet
+  • 描述: 基于cron表达式的定时自动发送消息插件`
+
+		// 直接使用gotd API发送响应
+		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve peer: %w", err)
+		}
+
+		if ctx.Message.ChatID > 0 {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: autoSendHelp,
+			})
+			return err
+		} else {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: autoSendHelp,
+			})
+			if err != nil {
+				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
+					Peer:     peer,
+					Message:  autoSendHelp,
 					RandomID: time.Now().UnixNano(),
 				})
 			}
@@ -675,6 +754,12 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	geminiPlugin := NewGeminiPlugin(manager.GetDatabase())
 	if err := manager.RegisterPlugin(geminiPlugin); err != nil {
 		return fmt.Errorf("failed to register Gemini plugin: %w", err)
+	}
+
+	// 注册AutoSend插件
+	autoSendPlugin := NewAutoSendPlugin(manager.GetDatabase())
+	if err := manager.RegisterPlugin(autoSendPlugin); err != nil {
+		return fmt.Errorf("failed to register AutoSend plugin: %w", err)
 	}
 
 	logger.Infof("All builtin plugins registered successfully")
