@@ -13,6 +13,7 @@ import (
 	"nexusvalet/pkg/logger"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +49,12 @@ type Bot struct {
 func NewBot(cfg *config.Config) (*Bot, error) {
 	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// 确保数据库文件的目录存在
+	if err := os.MkdirAll(filepath.Dir(cfg.Telegram.Database), 0755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
 
 	// 初始化会话管理器
 	sessionMgr, err := session.NewManager(cfg.Telegram.Database)
@@ -753,6 +760,11 @@ func createInputPeerFromMessage(message *tg.Message) tg.InputPeerClass {
 // checkAndCreateSession 检查会话是否存在，如果不存在，引导登录
 func checkAndCreateSession(cfg *config.Config) error {
 	sessionFile := cfg.Telegram.Session
+
+	// 确保会话文件的目录存在
+	if err := os.MkdirAll(filepath.Dir(sessionFile), 0755); err != nil {
+		return fmt.Errorf("failed to create session directory: %w", err)
+	}
 
 	// 检查会话是否存在
 	if _, err := os.Stat(sessionFile); os.IsNotExist(err) {

@@ -39,8 +39,8 @@ func DefaultConfig() *Config {
 		Telegram: TelegramConfig{
 			APIID:    0,  // 需要用户提供
 			APIHash:  "", // 需要用户提供
-			Session:  "session.json",
-			Database: "sessions.db",
+			Session:  "session/session.json",
+			Database: "session/sessions.db",
 		},
 		Bot: BotConfig{
 			CommandPrefix: ".",

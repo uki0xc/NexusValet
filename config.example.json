@@ -2,8 +2,8 @@
   "telegram": {
     "api_id": 0,
     "api_hash": "your_api_hash_here",
-    "session_file": "session.json",
-    "database_file": "sessions.db"
+    "session_file": "session/session.json",
+    "database_file": "session/sessions.db"
   },
   "bot": {
     "command_prefix": ".",
