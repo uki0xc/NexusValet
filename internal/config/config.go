@@ -124,5 +124,16 @@ func (c *Config) Validate() error {
 
 // GetConfigPath returns the default config file path
 func GetConfigPath() string {
+	// 首先检查当前目录
+	if _, err := os.Stat("config.json"); err == nil {
+		return "config.json"
+	}
+
+	// 检查上级目录（适用于从bin目录启动的情况）
+	if _, err := os.Stat("../config.json"); err == nil {
+		return "../config.json"
+	}
+
+	// 默认返回当前目录
 	return "config.json"
 }
