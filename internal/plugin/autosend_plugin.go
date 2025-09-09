@@ -439,8 +439,8 @@ func (asp *AutoSendPlugin) handleAdd(ctx *command.CommandContext) error {
 	nextRun := schedule.Next(time.Now())
 
 	result, err := asp.db.Exec(`
-		INSERT INTO autosend_tasks (chat_id, message, cron_expr, enabled, interval_seconds, next_run)
-		VALUES (?, ?, ?, 1, 0, ?)
+		INSERT INTO autosend_tasks (chat_id, message, cron_expr, enabled, next_run)
+		VALUES (?, ?, ?, 1, ?)
 	`, chatID, message, cronExpr, nextRun.Format("2006-01-02 15:04:05"))
 
 	if err != nil {
