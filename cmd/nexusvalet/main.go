@@ -825,10 +825,15 @@ func main() {
 	logger.Infof("NexusValet v1.0.0 starting...")
 
 	// 加载配置
-	cfg, err := config.LoadConfig(config.GetConfigPath())
+	configPath := config.GetConfigPath()
+	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
+
+	// 规范化会话文件路径，确保相对于配置文件位置
+	cfg.Telegram.Session = config.NormalizePath(configPath, cfg.Telegram.Session)
+	cfg.Telegram.Database = config.NormalizePath(configPath, cfg.Telegram.Database)
 
 	// 从配置设置日志级别
 	logger.SetLevel(logger.ParseLevel(cfg.Logger.Level))

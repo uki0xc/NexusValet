@@ -137,3 +137,21 @@ func GetConfigPath() string {
 	// 默认返回当前目录
 	return "config.json"
 }
+
+// NormalizePath 将相对于配置文件的路径转换为绝对路径
+func NormalizePath(configPath, relativePath string) string {
+	if filepath.IsAbs(relativePath) {
+		return relativePath
+	}
+
+	// 获取配置文件所在目录
+	configDir := filepath.Dir(configPath)
+
+	// 如果配置文件在当前目录，直接返回相对路径
+	if configDir == "." {
+		return relativePath
+	}
+
+	// 将路径相对于配置文件目录
+	return filepath.Join(configDir, relativePath)
+}
