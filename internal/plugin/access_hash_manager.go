@@ -250,28 +250,121 @@ func (ahm *AccessHashManager) getCachedUser(userID int64) *UserInfo {
 
 // fetchAndCacheUser 从API获取并缓存用户信息
 func (ahm *AccessHashManager) fetchAndCacheUser(ctx context.Context, userID int64) (*UserInfo, error) {
-	// 尝试通过UsersGetUsers获取用户信息
+	// 方法1：尝试通过UsersGetUsers获取用户信息
 	users, err := ahm.api.UsersGetUsers(ctx, []tg.InputUserClass{
 		&tg.InputUser{UserID: userID, AccessHash: 0},
 	})
+	if err == nil && len(users) > 0 {
+		if user, ok := users[0].(*tg.User); ok {
+			userInfo := ahm.cacheUser(user)
+			logger.Infof("通过UsersGetUsers获取并缓存用户%d的access_hash: %d", userID, user.AccessHash)
+			return userInfo, nil
+		}
+	}
+	logger.Debugf("UsersGetUsers方法失败: %v", err)
+
+	// 方法2：尝试从对话列表获取
+	userInfo, err := ahm.fetchUserFromDialogs(ctx, userID)
+	if err == nil {
+		return userInfo, nil
+	}
+	logger.Debugf("从对话列表获取用户失败: %v", err)
+
+	// 方法3：尝试通过联系人获取
+	userInfo, err = ahm.fetchUserFromContacts(ctx, userID)
+	if err == nil {
+		return userInfo, nil
+	}
+	logger.Debugf("从联系人获取用户失败: %v", err)
+
+	// 方法4：尝试解析用户名（如果是机器人）
+	userInfo, err = ahm.fetchBotByUsername(ctx, userID)
+	if err == nil {
+		return userInfo, nil
+	}
+	logger.Debugf("通过用户名解析机器人失败: %v", err)
+
+	return nil, fmt.Errorf("所有方法都无法获取用户%d的信息", userID)
+}
+
+// fetchUserFromDialogs 从对话列表中获取用户信息
+func (ahm *AccessHashManager) fetchUserFromDialogs(ctx context.Context, userID int64) (*UserInfo, error) {
+	// 获取对话列表
+	dialogs, err := ahm.api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		OffsetDate: 0,
+		OffsetID:   0,
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      200, // 获取更多对话
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取对话列表失败: %v", err)
 	}
 
-	if len(users) == 0 {
-		return nil, fmt.Errorf("用户不存在")
+	var users []tg.UserClass
+	if ds, ok := dialogs.(*tg.MessagesDialogs); ok {
+		users = ds.Users
+	} else if ds, ok := dialogs.(*tg.MessagesDialogsSlice); ok {
+		users = ds.Users
 	}
 
-	user, ok := users[0].(*tg.User)
-	if !ok {
-		return nil, fmt.Errorf("用户信息类型错误")
+	for _, u := range users {
+		if user, ok := u.(*tg.User); ok && user.ID == userID {
+			userInfo := ahm.cacheUser(user)
+			logger.Infof("从对话列表获取并缓存用户%d的access_hash: %d", userID, user.AccessHash)
+			return userInfo, nil
+		}
 	}
 
-	// 缓存用户信息
-	userInfo := ahm.cacheUser(user)
-	logger.Infof("获取并缓存用户%d的access_hash: %d", userID, user.AccessHash)
+	return nil, fmt.Errorf("在对话列表中未找到用户%d", userID)
+}
 
-	return userInfo, nil
+// fetchUserFromContacts 从联系人中获取用户信息
+func (ahm *AccessHashManager) fetchUserFromContacts(ctx context.Context, userID int64) (*UserInfo, error) {
+	// 获取联系人列表
+	contacts, err := ahm.api.ContactsGetContacts(ctx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("获取联系人列表失败: %v", err)
+	}
+
+	var users []tg.UserClass
+	if contactsResult, ok := contacts.(*tg.ContactsContacts); ok {
+		users = contactsResult.Users
+	}
+
+	for _, u := range users {
+		if user, ok := u.(*tg.User); ok && user.ID == userID {
+			userInfo := ahm.cacheUser(user)
+			logger.Infof("从联系人获取并缓存用户%d的access_hash: %d", userID, user.AccessHash)
+			return userInfo, nil
+		}
+	}
+
+	return nil, fmt.Errorf("在联系人中未找到用户%d", userID)
+}
+
+// fetchBotByUsername 尝试通过常见的机器人用户名模式解析机器人
+func (ahm *AccessHashManager) fetchBotByUsername(ctx context.Context, userID int64) (*UserInfo, error) {
+	// 常见的机器人用户名模式（这个方法比较有限，因为我们不知道确切的用户名）
+	// 这里我们尝试一些通用的方法
+
+	// 方法：尝试通过搜索功能
+	searchResult, err := ahm.api.ContactsSearch(ctx, &tg.ContactsSearchRequest{
+		Q:     fmt.Sprintf("%d", userID), // 使用用户ID作为搜索关键词
+		Limit: 10,
+	})
+	if err == nil {
+		users := searchResult.Users
+
+		for _, u := range users {
+			if user, ok := u.(*tg.User); ok && user.ID == userID {
+				userInfo := ahm.cacheUser(user)
+				logger.Infof("通过搜索获取并缓存用户%d的access_hash: %d", userID, user.AccessHash)
+				return userInfo, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("无法通过搜索找到用户%d", userID)
 }
 
 // cacheUser 缓存用户信息

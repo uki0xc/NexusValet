@@ -31,13 +31,14 @@ type AutoSendTask struct {
 // AutoSendPlugin 自动发送插件
 type AutoSendPlugin struct {
 	*BasePlugin
-	db            *sql.DB
-	telegramAPI   *tg.Client
-	peerResolver  *peers.Resolver
-	tasks         map[int64]*AutoSendTask
-	tasksMutex    sync.RWMutex
-	cronScheduler *cron.Cron
-	running       bool
+	db                *sql.DB
+	telegramAPI       *tg.Client
+	peerResolver      *peers.Resolver
+	accessHashManager *AccessHashManager
+	tasks             map[int64]*AutoSendTask
+	tasksMutex        sync.RWMutex
+	cronScheduler     *cron.Cron
+	running           bool
 }
 
 // NewAutoSendPlugin 创建自动发送插件
@@ -97,6 +98,7 @@ func (asp *AutoSendPlugin) Shutdown(ctx context.Context) error {
 func (asp *AutoSendPlugin) SetTelegramClient(client *tg.Client, peerResolver *peers.Resolver) {
 	asp.telegramAPI = client
 	asp.peerResolver = peerResolver
+	asp.accessHashManager = NewAccessHashManager(client)
 }
 
 // RegisterCommands 注册命令
@@ -354,26 +356,107 @@ func (asp *AutoSendPlugin) executeTask(task *AutoSendTask) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// 解析聊天ID为peer
-	peer, err := asp.peerResolver.ResolveFromChatID(ctx, task.ChatID)
-	if err != nil {
-		logger.Errorf("Failed to resolve peer for chat %d: %v", task.ChatID, err)
-		return
+	// 尝试发送消息，带重试机制
+	success := asp.sendMessageWithRetry(ctx, task)
+	if success {
+		logger.Infof("AutoSend task %d executed successfully (cron: %s)", task.ID, task.CronExpr)
+	} else {
+		logger.Errorf("AutoSend task %d failed after all retry attempts", task.ID)
+		// 可选：禁用失败的任务以避免持续错误
+		asp.handleFailedTask(task)
+	}
+}
+
+// sendMessageWithRetry 带重试机制的消息发送
+func (asp *AutoSendPlugin) sendMessageWithRetry(ctx context.Context, task *AutoSendTask) bool {
+	maxRetries := 3
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// 解析聊天ID为peer，针对机器人用户使用特殊处理
+		peer, err := asp.resolvePeerForTask(ctx, task.ChatID)
+		if err != nil {
+			logger.Errorf("Attempt %d: Failed to resolve peer for chat %d: %v", attempt, task.ChatID, err)
+			if attempt < maxRetries {
+				time.Sleep(time.Duration(attempt) * time.Second) // 递增延迟
+				continue
+			}
+			return false
+		}
+
+		// 发送消息
+		_, err = asp.telegramAPI.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+			Peer:     peer,
+			Message:  task.Message,
+			RandomID: time.Now().UnixNano(),
+		})
+
+		if err != nil {
+			errStr := err.Error()
+			logger.Errorf("Attempt %d: Failed to send autosend message to chat %d: %v", attempt, task.ChatID, err)
+
+			// 检查是否是可重试的错误
+			if asp.isRetryableError(errStr) && attempt < maxRetries {
+				logger.Infof("Retryable error detected, waiting before retry...")
+				time.Sleep(time.Duration(attempt*2) * time.Second) // 递增延迟
+				continue
+			}
+
+			// 不可重试的错误或已达到最大重试次数
+			return false
+		}
+
+		// 成功发送
+		return true
 	}
 
-	// 发送消息
-	_, err = asp.telegramAPI.MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
-		Peer:     peer,
-		Message:  task.Message,
-		RandomID: time.Now().UnixNano(),
-	})
+	return false
+}
 
-	if err != nil {
-		logger.Errorf("Failed to send autosend message to chat %d: %v", task.ChatID, err)
-		return
+// resolvePeerForTask 为任务解析peer，针对机器人用户使用特殊处理
+func (asp *AutoSendPlugin) resolvePeerForTask(ctx context.Context, chatID int64) (tg.InputPeerClass, error) {
+	// 如果是用户（正数chatID，可能是机器人）
+	if chatID > 0 && asp.accessHashManager != nil {
+		// 尝试使用AccessHashManager获取正确的AccessHash
+		userPeer, err := asp.accessHashManager.GetUserPeerWithFallback(ctx, chatID, nil)
+		if err == nil {
+			logger.Debugf("Successfully resolved user %d with AccessHashManager", chatID)
+			return userPeer, nil
+		}
+		logger.Warnf("AccessHashManager failed for user %d: %v, falling back to standard resolver", chatID, err)
 	}
 
-	logger.Infof("AutoSend task %d executed successfully (cron: %s)", task.ID, task.CronExpr)
+	// 回退到标准的peer resolver
+	return asp.peerResolver.ResolveFromChatID(ctx, chatID)
+}
+
+// isRetryableError 判断错误是否可重试
+func (asp *AutoSendPlugin) isRetryableError(errStr string) bool {
+	retryableErrors := []string{
+		"PEER_ID_INVALID",
+		"ACCESS_HASH_INVALID",
+		"CHANNEL_INVALID",
+		"FLOOD_WAIT",
+		"TIMEOUT",
+		"network",
+		"connection",
+	}
+
+	errStrLower := strings.ToLower(errStr)
+	for _, retryableErr := range retryableErrors {
+		if strings.Contains(errStrLower, strings.ToLower(retryableErr)) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleFailedTask 处理失败的任务
+func (asp *AutoSendPlugin) handleFailedTask(task *AutoSendTask) {
+	// 记录失败次数（可以扩展为在数据库中跟踪）
+	logger.Warnf("Task %d failed multiple times, consider checking chat ID %d validity", task.ID, task.ChatID)
+
+	// 可选：自动禁用连续失败的任务
+	// 这里暂时只记录，不自动禁用，让用户手动处理
 }
 
 // handleAutoSend 处理autosend命令
@@ -394,6 +477,10 @@ func (asp *AutoSendPlugin) handleAutoSend(ctx *command.CommandContext) error {
 		return asp.handleEnable(ctx)
 	case "disable":
 		return asp.handleDisable(ctx)
+	case "check":
+		return asp.handleCheck(ctx)
+	case "resolve":
+		return asp.handleResolve(ctx)
 	case "help":
 		return asp.sendHelp(ctx)
 	default:
@@ -799,6 +886,133 @@ func (asp *AutoSendPlugin) handleDisable(ctx *command.CommandContext) error {
 	return nil
 }
 
+// handleCheck 处理检查任务有效性
+func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
+	asp.tasksMutex.RLock()
+	defer asp.tasksMutex.RUnlock()
+
+	if len(asp.tasks) == 0 {
+		return asp.sendResponse(ctx, "当前没有自动发送任务需要检查")
+	}
+
+	var response strings.Builder
+	response.WriteString("🔍 检查任务有效性结果:\n\n")
+
+	validTasks := 0
+	invalidTasks := 0
+	checkCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, task := range asp.tasks {
+		status := "✅ 有效"
+		chatInfo := asp.getChatInfo(task.ChatID)
+
+		// 尝试解析peer来检查任务是否有效
+		if asp.peerResolver != nil {
+			_, err := asp.peerResolver.ResolveFromChatID(checkCtx, task.ChatID)
+			if err != nil {
+				status = "❌ 无效 - " + err.Error()
+				invalidTasks++
+			} else {
+				validTasks++
+			}
+		} else {
+			status = "⚠️ 无法检查 - peer resolver 不可用"
+		}
+
+		response.WriteString(fmt.Sprintf("ID: %d\n", task.ID))
+		response.WriteString(fmt.Sprintf("状态: %s\n", status))
+		response.WriteString(fmt.Sprintf("聊天: %s\n", chatInfo))
+		response.WriteString(fmt.Sprintf("消息: %s\n", task.Message))
+		response.WriteString("─────────────\n")
+	}
+
+	response.WriteString("\n📊 统计:\n")
+	response.WriteString(fmt.Sprintf("• 有效任务: %d\n", validTasks))
+	response.WriteString(fmt.Sprintf("• 无效任务: %d\n", invalidTasks))
+	response.WriteString(fmt.Sprintf("• 总任务数: %d\n", len(asp.tasks)))
+
+	if invalidTasks > 0 {
+		response.WriteString("\n💡 建议:\n")
+		response.WriteString("• 使用 .autosend remove <ID> 删除无效任务\n")
+		response.WriteString("• 检查聊天是否仍然存在或您是否仍在其中\n")
+	}
+
+	return asp.sendResponse(ctx, response.String())
+}
+
+// handleResolve 处理解析用户/机器人命令
+func (asp *AutoSendPlugin) handleResolve(ctx *command.CommandContext) error {
+	if len(ctx.Args) < 2 {
+		return asp.sendResponse(ctx, "用法: .autosend resolve <用户ID>\n例如: .autosend resolve 7626887601")
+	}
+
+	userIDStr := ctx.Args[1]
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return asp.sendResponse(ctx, "无效的用户ID: "+userIDStr)
+	}
+
+	if asp.accessHashManager == nil {
+		return asp.sendResponse(ctx, "AccessHashManager 未初始化")
+	}
+
+	var response strings.Builder
+	response.WriteString(fmt.Sprintf("🔍 尝试解析用户 %d:\n\n", userID))
+
+	resolveCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// 尝试获取用户信息
+	userPeer, err := asp.accessHashManager.GetUserPeerWithFallback(resolveCtx, userID, nil)
+	if err != nil {
+		response.WriteString(fmt.Sprintf("❌ 解析失败: %v\n\n", err))
+
+		// 提供建议
+		response.WriteString("💡 可能的解决方案:\n")
+		response.WriteString("1. 确保您与该用户/机器人有过对话\n")
+		response.WriteString("2. 尝试先发送一条消息给该机器人\n")
+		response.WriteString("3. 检查用户ID是否正确\n")
+		response.WriteString("4. 该用户可能已删除账户或阻止了您\n\n")
+
+		// 尝试提供一个简单的交互方法
+		response.WriteString("🤖 如果这是一个机器人，您可以：\n")
+		response.WriteString(fmt.Sprintf("• 在Telegram中搜索并打开与机器人的对话\n"))
+		response.WriteString("• 发送 /start 命令给机器人\n")
+		response.WriteString("• 然后重新尝试创建 autosend 任务\n")
+	} else {
+		// userPeer 已经是 *tg.InputPeerUser 类型，因为 GetUserPeerWithFallback 返回该类型
+		inputUser := userPeer
+		if inputUser != nil {
+			response.WriteString("✅ 解析成功!\n")
+			response.WriteString(fmt.Sprintf("用户ID: %d\n", inputUser.UserID))
+			response.WriteString(fmt.Sprintf("AccessHash: %d\n\n", inputUser.AccessHash))
+
+			// 检查缓存信息
+			if userInfo := asp.accessHashManager.GetCachedUserInfo(userID); userInfo != nil {
+				response.WriteString("📋 缓存信息:\n")
+				if userInfo.Username != "" {
+					response.WriteString(fmt.Sprintf("用户名: @%s\n", userInfo.Username))
+				}
+				if userInfo.FirstName != "" {
+					response.WriteString(fmt.Sprintf("名字: %s", userInfo.FirstName))
+					if userInfo.LastName != "" {
+						response.WriteString(fmt.Sprintf(" %s", userInfo.LastName))
+					}
+					response.WriteString("\n")
+				}
+				response.WriteString(fmt.Sprintf("缓存时间: %s\n\n", userInfo.UpdatedAt.Format("2006-01-02 15:04:05")))
+			}
+
+			response.WriteString("✅ 现在您可以正常创建 autosend 任务了！")
+		} else {
+			response.WriteString("⚠️ 解析成功，但返回了非用户类型的peer\n")
+		}
+	}
+
+	return asp.sendResponse(ctx, response.String())
+}
+
 // sendHelp 发送帮助信息
 func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 	helpMsg := `🤖 AutoSend 定时发送插件帮助
@@ -809,6 +1023,8 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 • .autosend remove <ID> - 删除任务
 • .autosend enable <ID> - 启用任务
 • .autosend disable <ID> - 禁用任务
+• .autosend check - 检查所有任务的有效性
+• .autosend resolve <用户ID> - 解析用户/机器人的AccessHash
 
 📋 Cron表达式格式: 秒 分 时 日 月 周
 • 每天0点: 0 0 0 * * *
