@@ -123,6 +123,28 @@ make run
 - `.gemini model <模型名>` - 设置使用的模型
 - `.gemini auto <True/False>` - 设置自动删除空提问
 
+### 自动发送（autosend）命令
+
+- `.autosend add <秒> <分> <时> <日> <月> <周> <消息>` 或 `.as add` - 创建定时发送任务
+- `.autosend list` 或 `.as list` - 查看所有任务列表
+- `.autosend remove <任务ID>` 或 `.as remove` - 删除指定任务
+- `.autosend enable <任务ID>` 或 `.as enable` - 启用指定任务
+- `.autosend disable <任务ID>` 或 `.as disable` - 禁用指定任务
+
+**Cron表达式格式**: `秒 分 时 日 月 周`
+
+**常用示例**:
+- `0 0 0 * * *` - 每天0点
+- `0 30 12 * * *` - 每天12:30
+- `0 */10 * * * *` - 每10分钟
+- `0 0 9 * * 1-5` - 工作日9点
+
+**说明**:
+- 任务会在创建命令的聊天中发送消息
+- 支持私聊、群聊、频道等所有聊天类型
+- 命令消息会在15秒后自动删除
+- 任务信息显示发送目标聊天类型
+
 ### 封禁（sb）命令
 
 - `.sb`（回复一条消息使用）- 封禁被回复的用户
@@ -146,11 +168,17 @@ make run
 
 - **[gotd/td](https://github.com/gotd/td)** - Telegram MTProto API 库
 - **[modernc.org/sqlite](https://modernc.org/sqlite)** - SQLite 数据库驱动
+- **[robfig/cron/v3](https://github.com/robfig/cron)** - Cron任务调度库
 
 ## 🔨 内置插件
 
 - **核心命令（core）**: `.status`, `.help`
 - **插件管理（apt）**: `.apt list`, `.apt enable`, `.apt disable`
+- **自动发送（autosend）**:
+  - 功能：基于Cron表达式的定时消息发送
+  - 特性：支持秒级精度、任务管理（增删改查）、多聊天类型支持
+  - 数据库：SQLite持久化存储，支持任务迁移
+  - 安全：命令消息自动删除、聊天信息显示
 - **超级封禁（sb）**:
   - 功能：封禁用户、可选清理消息历史
   - AccessHash 管理：内置 AccessHashManager，支持缓存、从回复消息解析、从群成员列表与参与者信息回退获取
