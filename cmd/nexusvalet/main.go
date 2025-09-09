@@ -62,7 +62,7 @@ func NewBot(cfg *config.Config) (*Bot, error) {
 	commandParser := command.NewParser(cfg.Bot.CommandPrefix, dispatcher, hookManager)
 
 	// 初始化Go插件管理器
-	pluginManager := plugin.NewGoManager(commandParser, dispatcher, hookManager)
+	pluginManager := plugin.NewGoManager(commandParser, dispatcher, hookManager, sessionMgr.GetDB())
 
 	bot := &Bot{
 		config:        cfg,

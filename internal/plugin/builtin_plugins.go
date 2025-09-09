@@ -203,6 +203,8 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 • .st [服务器ID] - 网络速度测试
 • .st list - 列出附近的测速服务器
 • .sb [用户ID/用户名] [不删除消息] - 超级封禁用户并删除消息历史
+• .gemini <问题> - Gemini AI智能问答(自动识别文本/图片)
+• .gm <问题> - Gemini简写命令
 
 💡 提示: 使用 .help core 或 .help sb 查看详细信息
 🚀 新版本: 现在使用Go插件系统，性能更佳！`
@@ -340,6 +342,66 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
 					Peer:     peer,
 					Message:  sbHelp,
+					RandomID: time.Now().UnixNano(),
+				})
+			}
+			return err
+		}
+	} else if pluginName == "gemini" {
+		geminiHelp := `🤖 Gemini AI插件详细帮助
+
+🚀 智能命令 (自动识别模式):
+  • .gemini <问题> - 智能问答，自动识别文本/图片
+  • .gm <问题> - 简写命令，功能同上
+
+✨ 智能功能:
+  • 📝 文本问答 - 直接提问即可
+  • 🖼️ 图片分析 - 发送图片时自动启用vision模式
+  • 🔄 回复模式 - 添加 "reply" 或 "r" 参数回复原消息
+  • 💬 上下文对话 - 回复消息后提问
+
+⚙️ 配置命令:
+  • .gemini config - 查看当前配置
+  • .gemini key <API密钥> - 设置API密钥
+  • .gemini model <模型名> - 设置模型(默认: gemini-1.5-flash)
+  • .gemini auto <True/False> - 设置自动删除空提问
+
+📝 使用示例:
+  • .gemini 什么是人工智能？
+  • .gm 解释这个概念
+  • .gemini reply 请详细说明 (回复到原消息)
+  • .gm r 分析这张图片 (发送图片+回复模式)
+  • .gemini config (查看配置)
+  • .gemini key AIza... (设置API密钥)
+
+🔌 插件信息:
+  • 名称: gemini  
+  • 版本: v1.0.0
+  • 描述: 简化的Gemini AI智能问答插件`
+
+		// 直接使用gotd API发送响应
+		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve peer: %w", err)
+		}
+
+		if ctx.Message.ChatID > 0 {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: geminiHelp,
+			})
+			return err
+		} else {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: geminiHelp,
+			})
+			if err != nil {
+				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
+					Peer:     peer,
+					Message:  geminiHelp,
 					RandomID: time.Now().UnixNano(),
 				})
 			}
@@ -607,6 +669,12 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	sbPlugin := NewSBPlugin()
 	if err := manager.RegisterPlugin(sbPlugin); err != nil {
 		return fmt.Errorf("failed to register SB plugin: %w", err)
+	}
+
+	// 注册Gemini插件
+	geminiPlugin := NewGeminiPlugin(manager.GetDatabase())
+	if err := manager.RegisterPlugin(geminiPlugin); err != nil {
+		return fmt.Errorf("failed to register Gemini plugin: %w", err)
 	}
 
 	logger.Infof("All builtin plugins registered successfully")

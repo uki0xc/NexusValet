@@ -130,6 +130,11 @@ func (m *Manager) Close() error {
 	return m.db.Close()
 }
 
+// GetDB returns the database connection
+func (m *Manager) GetDB() *sql.DB {
+	return m.db
+}
+
 // SessionContext provides an interface for plugins to interact with session data
 type SessionContext struct {
 	session *Session

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"nexusvalet/internal/command"
 	"nexusvalet/internal/core"
@@ -17,16 +18,18 @@ type GoManager struct {
 	parser      *command.Parser
 	dispatcher  *core.EventDispatcher
 	hookManager *core.HookManager
+	db          *sql.DB
 	mutex       sync.RWMutex
 }
 
 // NewGoManager 创建一个新的Go插件管理器
-func NewGoManager(parser *command.Parser, dispatcher *core.EventDispatcher, hookManager *core.HookManager) *GoManager {
+func NewGoManager(parser *command.Parser, dispatcher *core.EventDispatcher, hookManager *core.HookManager, db *sql.DB) *GoManager {
 	manager := &GoManager{
 		plugins:     make(map[string]Plugin),
 		parser:      parser,
 		dispatcher:  dispatcher,
 		hookManager: hookManager,
+		db:          db,
 	}
 
 	logger.Debugf("Go plugin manager initialized")
@@ -203,6 +206,11 @@ func (gm *GoManager) Shutdown() error {
 
 	logger.Infof("All plugins shutdown")
 	return nil
+}
+
+// GetDatabase 返回数据库连接
+func (gm *GoManager) GetDatabase() *sql.DB {
+	return gm.db
 }
 
 // SetTelegramClient 为所有支持的插件设置Telegram客户端
