@@ -1,6 +1,0 @@
-{
-  "name": "core_commands",
-  "version": "1.0.0",
-  "author": "NexusValet",
-  "description": "核心基础命令，包括 .status 和 .help"
-}

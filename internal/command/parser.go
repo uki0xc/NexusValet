@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"nexusvalet/internal/core"
+	"nexusvalet/internal/peers"
 	"nexusvalet/internal/session"
 	"nexusvalet/pkg/logger"
 	"strings"
@@ -41,9 +42,8 @@ type CommandContext struct {
 	Message      *core.MessageEvent
 	Session      *session.SessionContext
 	API          *tg.Client
-	Respond      func(string) error
-	ReplyTo      func(string) error
-	SendTyping   func() error
+	Context      context.Context // 添加context用于API调用
+	PeerResolver *peers.Resolver // 添加peer resolver用于解析聊天ID
 	DownloadFile func(document *tg.Document) ([]byte, error)
 	GetDocument  func() (*tg.Document, error)
 }
@@ -57,10 +57,7 @@ type Parser struct {
 	hookManager  *core.HookManager
 	sessionMgr   *session.Manager
 	telegramAPI  *tg.Client
-	responseFunc func(ctx context.Context, chatID int64, text string) error
-	replyFunc    func(ctx context.Context, chatID int64, messageID int, text string) error
-	typingFunc   func(ctx context.Context, chatID int64) error
-	editFunc     func(ctx context.Context, chatID int64, messageID int, text string) error
+	peerResolver *peers.Resolver
 }
 
 // NewParser 创建一个新的命令解析器
@@ -83,24 +80,15 @@ func NewParser(prefix string, dispatcher *core.EventDispatcher, hookManager *cor
 	return parser
 }
 
-// SetResponseFunctions 为解析器设置响应函数
-func (p *Parser) SetResponseFunctions(
-	sessionMgr *session.Manager,
-	responseFunc func(ctx context.Context, chatID int64, text string) error,
-	replyFunc func(ctx context.Context, chatID int64, messageID int, text string) error,
-	typingFunc func(ctx context.Context, chatID int64) error,
-	editFunc func(ctx context.Context, chatID int64, messageID int, text string) error,
-) {
+// SetSessionManager 设置会话管理器
+func (p *Parser) SetSessionManager(sessionMgr *session.Manager) {
 	p.sessionMgr = sessionMgr
-	p.responseFunc = responseFunc
-	p.replyFunc = replyFunc
-	p.typingFunc = typingFunc
-	p.editFunc = editFunc
 }
 
-// SetTelegramAPI 设置 Telegram API 客户端
-func (p *Parser) SetTelegramAPI(api *tg.Client) {
+// SetTelegramAPI 设置 Telegram API 客户端和 Peer 解析器
+func (p *Parser) SetTelegramAPI(api *tg.Client, peerResolver *peers.Resolver) {
 	p.telegramAPI = api
+	p.peerResolver = peerResolver
 }
 
 // GetTelegramAPI 返回 Telegram API 客户端实例
@@ -258,62 +246,15 @@ func (p *Parser) executeCommand(ctx context.Context, commandName string, args []
 		}
 	}
 
-	// Create command context
+	// Create command context - 直接提供gotd API访问
 	cmdCtx := &CommandContext{
-		Command: commandName,
-		Args:    args,
-		Message: msgEvent,
-		Session: sessionCtx,
-		API:     p.telegramAPI,
-		Respond: func(text string) error {
-			// Determine chat type based on Chat ID format
-			isPrivateChat := msgEvent.ChatID > 0
-
-			if isPrivateChat {
-				// Private chat: edit original message
-				if p.editFunc != nil && msgEvent.Message != nil {
-					return p.editFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
-				}
-			} else {
-				// Group chat/channel: try edit first, fallback to new message
-				if p.editFunc != nil && msgEvent.Message != nil {
-					err := p.editFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
-					if err != nil {
-						logger.Debugf("Failed to edit message (messageID=%d, chatID=%d): %v",
-							msgEvent.Message.ID, msgEvent.ChatID, err)
-
-						// Check if this is an access-related error
-						errStr := err.Error()
-						if strings.Contains(errStr, "ACCESS_HASH_INVALID") ||
-							strings.Contains(errStr, "CHANNEL_INVALID") ||
-							strings.Contains(errStr, "PEER_ID_INVALID") {
-							logger.Errorf("Access error detected for chatID=%d. Group may have changed from private to public.", msgEvent.ChatID)
-						}
-
-						// Fallback: send new message if edit fails
-						if p.responseFunc != nil {
-							logger.Infof("Falling back to sending new message")
-							return p.responseFunc(ctx, msgEvent.ChatID, text)
-						}
-						return err
-					}
-					return nil
-				}
-			}
-			return nil
-		},
-		ReplyTo: func(text string) error {
-			if p.replyFunc != nil && msgEvent.Message != nil {
-				return p.replyFunc(ctx, msgEvent.ChatID, msgEvent.Message.ID, text)
-			}
-			return nil
-		},
-		SendTyping: func() error {
-			if p.typingFunc != nil {
-				return p.typingFunc(ctx, msgEvent.ChatID)
-			}
-			return nil
-		},
+		Command:      commandName,
+		Args:         args,
+		Message:      msgEvent,
+		Session:      sessionCtx,
+		API:          p.telegramAPI,
+		Context:      ctx,
+		PeerResolver: p.peerResolver,
 		GetDocument: func() (*tg.Document, error) {
 			// First, check if the current message has media
 			if msgEvent.Message != nil && msgEvent.Message.Media != nil {

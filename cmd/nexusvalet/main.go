@@ -19,6 +19,7 @@ import (
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
@@ -30,7 +31,7 @@ type Bot struct {
 	dispatcher    *core.EventDispatcher
 	hookManager   *core.HookManager
 	commandParser *command.Parser
-	pluginManager *plugin.Manager
+	pluginManager *plugin.GoManager
 	sessionMgr    *session.Manager
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -60,8 +61,8 @@ func NewBot(cfg *config.Config) (*Bot, error) {
 	hookManager := core.NewHookManager()
 	commandParser := command.NewParser(cfg.Bot.CommandPrefix, dispatcher, hookManager)
 
-	// 初始化插件管理器
-	pluginManager := plugin.NewManager(cfg.Bot.PluginsDir, commandParser, dispatcher, hookManager)
+	// 初始化Go插件管理器
+	pluginManager := plugin.NewGoManager(commandParser, dispatcher, hookManager)
 
 	bot := &Bot{
 		config:        cfg,
@@ -75,20 +76,14 @@ func NewBot(cfg *config.Config) (*Bot, error) {
 		startTime:     time.Now(),
 	}
 
-	// 为命令解析器设置响应函数
-	commandParser.SetResponseFunctions(
-		sessionMgr,
-		bot.sendMessage,
-		bot.replyToMessage,
-		bot.sendTyping,
-		bot.editMessage,
-	)
-
 	// 创建 Telegram 客户端
 	if err := bot.createTelegramClient(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to create Telegram client: %w", err)
 	}
+
+	// 为命令解析器设置会话管理器
+	commandParser.SetSessionManager(sessionMgr)
 
 	return bot, nil
 }
@@ -130,7 +125,7 @@ func (b *Bot) createTelegramClient() error {
 	b.peerResolver = peers.NewResolver(b.api)
 
 	// Set the Telegram API for the command parser to enable file operations
-	b.commandParser.SetTelegramAPI(b.api)
+	b.commandParser.SetTelegramAPI(b.api, b.peerResolver)
 
 	return nil
 }
@@ -146,9 +141,9 @@ func (b *Bot) Start() error {
 		return fmt.Errorf("beforeStart hooks failed: %w", err)
 	}
 
-	// 加载所有插件
-	if err := b.pluginManager.LoadAllPlugins(); err != nil {
-		logger.Errorf("Failed to load plugins: %v", err)
+	// 注册所有内置插件
+	if err := plugin.RegisterBuiltinPlugins(b.pluginManager); err != nil {
+		logger.Errorf("Failed to register builtin plugins: %v", err)
 		// 仍然继续
 	}
 
@@ -166,6 +161,9 @@ func (b *Bot) Start() error {
 				logger.Debugf("Bot user ID: %d", b.selfUserID)
 			}
 		}
+
+		// 为插件设置Telegram客户端
+		b.pluginManager.SetTelegramClient(b.api)
 
 		// 执行 AfterStart 钩子
 		if err := b.hookManager.ExecuteHooks(core.AfterStart, map[string]interface{}{
@@ -195,6 +193,11 @@ func (b *Bot) Stop() error {
 
 	// 取消上下文以停止客户端
 	b.cancel()
+
+	// 关闭插件管理器
+	if err := b.pluginManager.Shutdown(); err != nil {
+		logger.Errorf("Failed to shutdown plugin manager: %v", err)
+	}
 
 	// 关闭会话管理器
 	if err := b.sessionMgr.Close(); err != nil {
@@ -415,6 +418,82 @@ func (b *Bot) sendTyping(ctx context.Context, chatID int64) error {
 		Action: &tg.SendMessageTypingAction{},
 	})
 	return err
+}
+
+// sendPhoto 发送图片
+func (b *Bot) sendPhoto(ctx context.Context, chatID int64, imagePath string, caption string) error {
+	peer, err := b.peerResolver.ResolveFromChatID(ctx, chatID)
+	if err != nil {
+		return err
+	}
+
+	// 读取图片文件
+	imageData, err := os.ReadFile(imagePath)
+	if err != nil {
+		return fmt.Errorf("failed to read image file: %w", err)
+	}
+
+	// 上传图片文件
+	uploader := uploader.NewUploader(b.api)
+	file, err := uploader.FromBytes(ctx, fmt.Sprintf("speedtest_%d.png", time.Now().Unix()), imageData)
+	if err != nil {
+		return fmt.Errorf("failed to upload image: %w", err)
+	}
+
+	// 发送图片消息
+	_, err = b.api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+		Peer: peer,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: file,
+		},
+		Message:  caption,
+		RandomID: time.Now().UnixNano(),
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to send photo: %w", err)
+	}
+
+	logger.Infof("Successfully sent photo to chatID=%d", chatID)
+	return nil
+}
+
+// editWithPhoto 编辑消息为图片
+func (b *Bot) editWithPhoto(ctx context.Context, chatID int64, messageID int, imagePath string, caption string) error {
+	peer, err := b.peerResolver.ResolveFromChatID(ctx, chatID)
+	if err != nil {
+		return err
+	}
+
+	// 读取图片文件
+	imageData, err := os.ReadFile(imagePath)
+	if err != nil {
+		return fmt.Errorf("failed to read image file: %w", err)
+	}
+
+	// 上传图片文件
+	uploader := uploader.NewUploader(b.api)
+	file, err := uploader.FromBytes(ctx, fmt.Sprintf("speedtest_%d.png", time.Now().Unix()), imageData)
+	if err != nil {
+		return fmt.Errorf("failed to upload image: %w", err)
+	}
+
+	// 编辑消息为图片
+	_, err = b.api.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{
+		Peer: peer,
+		ID:   messageID,
+		Media: &tg.InputMediaUploadedPhoto{
+			File: file,
+		},
+		Message: caption,
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to edit message with photo: %w", err)
+	}
+
+	logger.Infof("Successfully edited message %d with photo in chatID=%d", messageID, chatID)
+	return nil
 }
 
 // editMessage 编辑现有消息

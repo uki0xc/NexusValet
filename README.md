@@ -6,7 +6,7 @@ NexusValet 是一个基于 Go 语言和 gotd/td 库构建的 Telegram 人形机�
 
 - **🚀 事件驱动架构**: 支持消息事件、命令事件和原始事件的分层处理
 - **🔗 钩子系统**: 提供生命周期钩子，支持优先级排序和自定义处理
-- **🔌 插件系统**: 基于 Lua 脚本语言的动态插件加载和管理
+- **🔌 插件系统**: 基于 Go 的插件体系，内置多插件（支持命令/事件/钩子）
 - **⚡ 命令解析**: 支持 `.command` 格式的命令解析和执行
 - **💾 会话管理**: 基于 SQLite 的会话持久化存储
 - **📦 插件管理**: 类似 APT 的插件管理命令系统
@@ -20,13 +20,11 @@ NexusValet/
 ├── cmd/nexusvalet/           # 主程序入口
 ├── internal/
 │   ├── core/                 # 核心系统（事件总线、钩子）
-│   ├── plugin/               # 插件管理器和执行器
+│   ├── plugin/               # 插件管理器与内置插件（core/apt/speedtest/sb）
 │   ├── command/              # 命令解析器
 │   ├── peers/                # 用户/群组解析器
 │   └── session/              # 会话管理
 ├── pkg/logger/               # 日志系统
-├── plugins/                  # 插件目录
-│   └── core_commands/        # 核心命令插件
 ├── config.example.json       # 配置文件示例
 ├── Makefile                  # 构建脚本
 └── go.mod                    # Go 模块文件
@@ -36,8 +34,6 @@ NexusValet/
 
 - **Go**: 1.25.0 或更高版本
 - **操作系统**: Linux, macOS, Windows
-- **内存**: 至少 128MB RAM
-- **存储**: 至少 50MB 可用空间
 
 ## 🚀 快速开始
 
@@ -118,92 +114,40 @@ make run
 - `.help` - 显示帮助信息
 - `.help <插件名>` - 显示特定插件的帮助
 
+### 封禁（sb）命令
+
+- `.sb`（回复一条消息使用）- 封禁被回复的用户
+- `.sb <用户ID>` - 通过用户 ID 封禁用户
+- `.sb @<用户名>` - 通过用户名封禁用户
+- `.sb <用户ID|@用户名> 0` - 仅封禁，不删除其消息历史
+
+说明：
+- 仅限群组/超级群组使用，需要管理员权限
+- 成功封禁的提示消息会在 30 秒后自动删除
+- 当未提供完整上下文时，系统会自动解析并维护 access_hash 以提升成功率
+
 ### 插件管理命令
 
-- `.apt list` - 列出所有已安装插件
-- `.apt install <插件名>` - 安装插件 
+- `.apt list` - 列出所有已注册插件
 - `.apt enable <插件名>` - 启用插件
 - `.apt disable <插件名>` - 禁用插件
-- `.apt remove <插件名>` - 删除插件
 
-
-## 🛠️ 开发命令
-
-```bash
-# 开发模式运行
-make dev
-
-# 代码格式化
-make fmt
-
-# 代码检查
-make lint
-
-# 运行测试
-make test
-
-# 清理构建文件
-make clean
-
-# 跨平台构建
-make build-all
-```
 
 ## 📦 依赖库
 
 - **[gotd/td](https://github.com/gotd/td)** - Telegram MTProto API 库
-- **[gopher-lua](https://github.com/yuin/gopher-lua)** - Lua 脚本语言引擎
 - **[modernc.org/sqlite](https://modernc.org/sqlite)** - SQLite 数据库驱动
 
-## 🔧 配置选项
+## 🔨 内置插件
 
-### Telegram 配置
-- `api_id`: Telegram API ID
-- `api_hash`: Telegram API Hash
-- `session_file`: 会话文件路径
-- `database_file`: 数据库文件路径
+- 核心命令（core）: `.status`, `.help`
+- 插件管理（apt）: `.apt list`, `.apt enable`, `.apt disable`
+- 超级封禁（sb）:
+  - 功能：封禁用户、可选清理消息历史
+  - AccessHash 管理：内置 AccessHashManager，支持缓存、从回复消息解析、从群成员列表与参与者信息回退获取
+  - 输出：纯文本显示用户名与用户名片，不使用超链接
+  - 成功提示会在 30 秒后自动撤回
 
-### Bot 配置
-- `command_prefix`: 命令前缀（默认: "."）
-- `plugins_dir`: 插件目录路径
-
-### 日志配置
-- `level`: 日志级别（DEBUG, INFO, WARN, ERROR）
-
-## 🐛 故障排除
-
-### 常见问题
-
-1. **认证失败**
-   - 检查 API ID 和 Hash 是否正确
-   - 确保手机号码格式正确（包含国家代码）
-
-2. **插件加载失败**
-   - 检查插件语法是否正确
-   - 查看日志文件中的错误信息
-
-3. **连接问题**
-   - 检查网络连接
-   - 确认防火墙设置
-
-### 日志查看
-
-程序运行时会输出详细日志，包括：
-- 插件加载状态
-- 命令执行过程
-- 错误和警告信息
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-### 贡献指南
-
-1. Fork 项目
-2. 创建功能分支
-3. 提交更改
-4. 推送到分支
-5. 创建 Pull Request
 
 ## 📄 许可证
 
@@ -212,4 +156,3 @@ make build-all
 ## 🙏 致谢
 
 - **[gotd/td](https://github.com/gotd/td)** - 优秀的 Telegram 库
-- **[gopher-lua](https://github.com/yuin/gopher-lua)** - Lua 引擎
