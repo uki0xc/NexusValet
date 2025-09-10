@@ -244,5 +244,10 @@ func (gm *GoManager) SetTelegramClient(client *tg.Client) {
 				logger.Debugf("Set Telegram client for AutoSend plugin %s", name)
 			}
 		}
+		// 检查插件是否是DeleteMyMessagesPlugin类型
+		if dmePlugin, ok := plugin.(*DeleteMyMessagesPlugin); ok {
+			dmePlugin.SetTelegramClient(client)
+			logger.Debugf("Set Telegram client for DeleteMyMessages plugin %s", name)
+		}
 	}
 }

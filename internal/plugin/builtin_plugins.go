@@ -207,6 +207,7 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 • .gm <问题> - Gemini简写命令
 • .autosend <命令> - 基于cron表达式的定时发送
 • .as <命令> - autosend简写命令
+• .dme [数量] - 删除当前对话中您发送的特定数量消息
 
 💡 提示: 使用 .help core 或 .help autosend 查看详细信息
 🚀 新版本: 现在使用Go插件系统，性能更佳！`
@@ -486,6 +487,68 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 			}
 			return err
 		}
+	} else if pluginName == "dme" {
+		dmeHelp := `🗑️ DeleteMyMessages 删除我的消息插件详细帮助
+
+🗑️ .dme 命令:
+  删除当前对话中您发送的特定数量消息，功能包括:
+  • 🎯 精确删除指定数量的您发送的消息
+  • 🔍 自动筛选您发送的消息
+  • ⚡ 高效批量删除处理
+  • 🛡️ 防误操作保护机制
+
+📝 使用方法:
+  • .dme - 删除您发送的最近1条消息
+  • .dme 5 - 删除您发送的最近5条消息  
+  • .dme 20 - 删除您发送的最近20条消息
+
+⚠️ 注意事项:
+  • 只会删除您自己发送的消息，不影响他人消息
+  • 一次最多删除100条消息（防止误操作）
+  • 删除操作不可撤销，请谨慎使用
+  • 支持私聊、群聊、频道等所有聊天类型
+  • 删除过程异步进行，不会阻塞其他操作
+
+💡 使用场景:
+  • 清理测试消息
+  • 删除错误发送的内容
+  • 批量清理聊天记录
+  • 保护隐私信息
+
+🔌 插件信息:
+  • 名称: dme
+  • 版本: v1.0.0
+  • 作者: NexusValet
+  • 描述: 删除当前对话中您发送的特定数量的消息插件`
+
+		// 直接使用gotd API发送响应
+		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve peer: %w", err)
+		}
+
+		if ctx.Message.ChatID > 0 {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: dmeHelp,
+			})
+			return err
+		} else {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: dmeHelp,
+			})
+			if err != nil {
+				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
+					Peer:     peer,
+					Message:  dmeHelp,
+					RandomID: time.Now().UnixNano(),
+				})
+			}
+			return err
+		}
 	}
 
 	// 直接使用gotd API发送响应
@@ -760,6 +823,12 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	autoSendPlugin := NewAutoSendPlugin(manager.GetDatabase())
 	if err := manager.RegisterPlugin(autoSendPlugin); err != nil {
 		return fmt.Errorf("failed to register AutoSend plugin: %w", err)
+	}
+
+	// 注册DeleteMyMessages插件
+	dmePlugin := NewDeleteMyMessagesPlugin()
+	if err := manager.RegisterPlugin(dmePlugin); err != nil {
+		return fmt.Errorf("failed to register DeleteMyMessages plugin: %w", err)
 	}
 
 	logger.Infof("All builtin plugins registered successfully")
