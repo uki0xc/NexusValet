@@ -422,6 +422,13 @@ func (asp *AutoSendPlugin) resolvePeerForTask(ctx context.Context, chatID int64)
 			logger.Debugf("Successfully resolved user %d with AccessHashManager", chatID)
 			return userPeer, nil
 		}
+
+		// 如果AccessHashManager失败，检查是否是失败次数过多
+		if strings.Contains(err.Error(), "失败次数过多") {
+			logger.Errorf("User %d AccessHash获取失败次数过多，需要重新建立连接", chatID)
+			return nil, fmt.Errorf("用户%d的AccessHash已失效，请重新建立连接", chatID)
+		}
+
 		logger.Warnf("AccessHashManager failed for user %d: %v, falling back to standard resolver", chatID, err)
 	}
 
@@ -452,11 +459,34 @@ func (asp *AutoSendPlugin) isRetryableError(errStr string) bool {
 
 // handleFailedTask 处理失败的任务
 func (asp *AutoSendPlugin) handleFailedTask(task *AutoSendTask) {
-	// 记录失败次数（可以扩展为在数据库中跟踪）
+	// 记录失败次数
 	logger.Warnf("Task %d failed multiple times, consider checking chat ID %d validity", task.ID, task.ChatID)
 
-	// 可选：自动禁用连续失败的任务
-	// 这里暂时只记录，不自动禁用，让用户手动处理
+	// 如果是用户（正数chatID），清除其AccessHash缓存
+	if task.ChatID > 0 && asp.accessHashManager != nil {
+		asp.accessHashManager.ClearUserCache(task.ChatID)
+		logger.Infof("Cleared AccessHash cache for user %d due to task failure", task.ChatID)
+	}
+
+	// 自动禁用连续失败的任务（避免持续错误）
+	asp.tasksMutex.Lock()
+	defer asp.tasksMutex.Unlock()
+
+	// 从cron调度器移除
+	if task.cronID != 0 {
+		asp.cronScheduler.Remove(task.cronID)
+		task.cronID = 0
+	}
+
+	// 更新数据库状态
+	_, err := asp.db.Exec("UPDATE autosend_tasks SET enabled = 0 WHERE id = ?", task.ID)
+	if err != nil {
+		logger.Errorf("Failed to disable failed task %d: %v", task.ID, err)
+	} else {
+		// 更新内存状态
+		task.Enabled = false
+		logger.Infof("Auto-disabled failed task %d (chat %d)", task.ID, task.ChatID)
+	}
 }
 
 // handleAutoSend 处理autosend命令
@@ -481,6 +511,8 @@ func (asp *AutoSendPlugin) handleAutoSend(ctx *command.CommandContext) error {
 		return asp.handleCheck(ctx)
 	case "resolve":
 		return asp.handleResolve(ctx)
+	case "clear":
+		return asp.handleClear(ctx)
 	case "help":
 		return asp.sendHelp(ctx)
 	default:
@@ -906,6 +938,7 @@ func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
 	for _, task := range asp.tasks {
 		status := "✅ 有效"
 		chatInfo := asp.getChatInfo(task.ChatID)
+		accessHashStatus := ""
 
 		// 尝试解析peer来检查任务是否有效
 		if asp.peerResolver != nil {
@@ -913,6 +946,14 @@ func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
 			if err != nil {
 				status = "❌ 无效 - " + err.Error()
 				invalidTasks++
+
+				// 如果是用户，检查AccessHash状态
+				if task.ChatID > 0 && asp.accessHashManager != nil {
+					failureCount := asp.accessHashManager.getFailureCount(task.ChatID)
+					if failureCount > 0 {
+						accessHashStatus = fmt.Sprintf(" (AccessHash失败%d次)", failureCount)
+					}
+				}
 			} else {
 				validTasks++
 			}
@@ -921,7 +962,7 @@ func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
 		}
 
 		response.WriteString(fmt.Sprintf("ID: %d\n", task.ID))
-		response.WriteString(fmt.Sprintf("状态: %s\n", status))
+		response.WriteString(fmt.Sprintf("状态: %s%s\n", status, accessHashStatus))
 		response.WriteString(fmt.Sprintf("聊天: %s\n", chatInfo))
 		response.WriteString(fmt.Sprintf("消息: %s\n", task.Message))
 		response.WriteString("─────────────\n")
@@ -936,6 +977,8 @@ func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
 		response.WriteString("\n💡 建议:\n")
 		response.WriteString("• 使用 .autosend remove <ID> 删除无效任务\n")
 		response.WriteString("• 检查聊天是否仍然存在或您是否仍在其中\n")
+		response.WriteString("• 对于AccessHash失效的用户，使用 .autosend clear <用户ID> 清除缓存\n")
+		response.WriteString("• 重新发送消息给该用户/机器人，然后使用 .autosend resolve <用户ID>\n")
 	}
 
 	return asp.sendResponse(ctx, response.String())
@@ -977,7 +1020,7 @@ func (asp *AutoSendPlugin) handleResolve(ctx *command.CommandContext) error {
 
 		// 尝试提供一个简单的交互方法
 		response.WriteString("🤖 如果这是一个机器人，您可以：\n")
-		response.WriteString(fmt.Sprintf("• 在Telegram中搜索并打开与机器人的对话\n"))
+		response.WriteString("• 在Telegram中搜索并打开与机器人的对话\n")
 		response.WriteString("• 发送 /start 命令给机器人\n")
 		response.WriteString("• 然后重新尝试创建 autosend 任务\n")
 	} else {
@@ -1013,6 +1056,55 @@ func (asp *AutoSendPlugin) handleResolve(ctx *command.CommandContext) error {
 	return asp.sendResponse(ctx, response.String())
 }
 
+// handleClear 处理清理AccessHash缓存命令
+func (asp *AutoSendPlugin) handleClear(ctx *command.CommandContext) error {
+	if len(ctx.Args) < 2 {
+		return asp.sendResponse(ctx, "用法: .autosend clear <用户ID>\n例如: .autosend clear 7626887601\n\n这将清除指定用户的AccessHash缓存，强制重新获取")
+	}
+
+	userIDStr := ctx.Args[1]
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		return asp.sendResponse(ctx, "无效的用户ID: "+userIDStr)
+	}
+
+	if asp.accessHashManager == nil {
+		return asp.sendResponse(ctx, "AccessHashManager 未初始化")
+	}
+
+	// 清除指定用户的缓存
+	asp.accessHashManager.ClearUserCache(userID)
+
+	// 检查是否有相关的autosend任务
+	asp.tasksMutex.RLock()
+	var relatedTasks []int64
+	for taskID, task := range asp.tasks {
+		if task.ChatID == userID {
+			relatedTasks = append(relatedTasks, taskID)
+		}
+	}
+	asp.tasksMutex.RUnlock()
+
+	response := fmt.Sprintf("✅ 已清除用户 %d 的AccessHash缓存\n\n", userID)
+
+	if len(relatedTasks) > 0 {
+		response += fmt.Sprintf("📋 发现 %d 个相关任务:\n", len(relatedTasks))
+		for _, taskID := range relatedTasks {
+			response += fmt.Sprintf("• 任务ID: %d\n", taskID)
+		}
+		response += "\n💡 建议:\n"
+		response += "• 重新发送一条消息给该用户/机器人\n"
+		response += "• 然后使用 .autosend resolve <用户ID> 重新解析\n"
+		response += "• 或者重新创建相关任务\n"
+	} else {
+		response += "💡 建议:\n"
+		response += "• 重新发送一条消息给该用户/机器人\n"
+		response += "• 然后使用 .autosend resolve <用户ID> 重新解析\n"
+	}
+
+	return asp.sendResponse(ctx, response)
+}
+
 // sendHelp 发送帮助信息
 func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 	helpMsg := `🤖 AutoSend 定时发送插件帮助
@@ -1025,6 +1117,7 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 • .autosend disable <ID> - 禁用任务
 • .autosend check - 检查所有任务的有效性
 • .autosend resolve <用户ID> - 解析用户/机器人的AccessHash
+• .autosend clear <用户ID> - 清除用户AccessHash缓存
 
 📋 Cron表达式格式: 秒 分 时 日 月 周
 • 每天0点: 0 0 0 * * *
@@ -1050,6 +1143,13 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 • 任务会在当前聊天中执行
 • 重启后任务会自动恢复
 • 使用.as作为简写命令
+
+🔧 故障排除:
+• 如果任务失败显示"PEER_ID_INVALID"，说明AccessHash已失效
+• 使用 .autosend clear <用户ID> 清除缓存
+• 重新发送消息给该用户/机器人
+• 使用 .autosend resolve <用户ID> 重新解析
+• 任务连续失败3次会自动禁用
 
 🔌 插件信息:
 • 名称: autosend

@@ -25,16 +25,20 @@ type AccessHashManager struct {
 	api       *tg.Client
 	userCache map[int64]*UserInfo
 	mutex     sync.RWMutex
-	// 缓存过期时间（24小时）
+	// 缓存过期时间（12小时，更保守的设置）
 	cacheExpiry time.Duration
+	// 失败重试计数
+	failureCount map[int64]int
+	failureMutex sync.RWMutex
 }
 
 // NewAccessHashManager 创建新的AccessHashManager
 func NewAccessHashManager(api *tg.Client) *AccessHashManager {
 	return &AccessHashManager{
-		api:         api,
-		userCache:   make(map[int64]*UserInfo),
-		cacheExpiry: 24 * time.Hour,
+		api:          api,
+		userCache:    make(map[int64]*UserInfo),
+		cacheExpiry:  12 * time.Hour, // 更保守的缓存时间
+		failureCount: make(map[int64]int),
 	}
 }
 
@@ -65,9 +69,16 @@ func (ahm *AccessHashManager) GetUserPeer(ctx context.Context, userID int64) (*t
 
 // GetUserPeerWithFallback 获取用户Peer，包含回退策略
 func (ahm *AccessHashManager) GetUserPeerWithFallback(ctx context.Context, userID int64, channelPeer tg.InputChannelClass) (*tg.InputPeerUser, error) {
+	// 检查失败次数，如果失败太多次，直接返回错误而不是使用无效的AccessHash
+	if ahm.getFailureCount(userID) >= 3 {
+		return nil, fmt.Errorf("用户%d的AccessHash获取失败次数过多，请重新建立连接", userID)
+	}
+
 	// 方法1：先尝试标准获取
 	userPeer, err := ahm.GetUserPeer(ctx, userID)
 	if err == nil {
+		// 成功时重置失败计数
+		ahm.resetFailureCount(userID)
 		return userPeer, nil
 	}
 
@@ -75,6 +86,7 @@ func (ahm *AccessHashManager) GetUserPeerWithFallback(ctx context.Context, userI
 	if channelPeer != nil {
 		userPeer, err = ahm.GetUserPeerFromParticipant(ctx, channelPeer, userID)
 		if err == nil {
+			ahm.resetFailureCount(userID)
 			return userPeer, nil
 		}
 		logger.Warnf("从群组参与者获取用户%d失败: %v", userID, err)
@@ -84,14 +96,17 @@ func (ahm *AccessHashManager) GetUserPeerWithFallback(ctx context.Context, userI
 	if channelPeer != nil {
 		userPeer, err = ahm.searchUserInChannel(ctx, channelPeer, userID)
 		if err == nil {
+			ahm.resetFailureCount(userID)
 			return userPeer, nil
 		}
 		logger.Warnf("通过搜索群组成员获取用户%d失败: %v", userID, err)
 	}
 
-	// 最后的回退：使用AccessHash=0
-	logger.Warnf("所有方法都失败，对用户%d使用AccessHash=0作为最后回退", userID)
-	return &tg.InputPeerUser{UserID: userID, AccessHash: 0}, nil
+	// 增加失败计数
+	ahm.incrementFailureCount(userID)
+
+	// 不再使用AccessHash=0作为回退，直接返回错误
+	return nil, fmt.Errorf("无法获取用户%d的有效AccessHash，请重新建立与该用户的连接", userID)
 }
 
 // searchUserInChannel 在频道中搜索用户
@@ -410,13 +425,41 @@ func (ahm *AccessHashManager) GetCacheStats() (total int, expired int) {
 	defer ahm.mutex.RUnlock()
 
 	now := time.Now()
-	total = len(ahm.userCache)
-
 	for _, userInfo := range ahm.userCache {
+		total++
 		if now.Sub(userInfo.UpdatedAt) > ahm.cacheExpiry {
 			expired++
 		}
 	}
+	return
+}
 
-	return total, expired
+// getFailureCount 获取用户失败次数
+func (ahm *AccessHashManager) getFailureCount(userID int64) int {
+	ahm.failureMutex.RLock()
+	defer ahm.failureMutex.RUnlock()
+	return ahm.failureCount[userID]
+}
+
+// incrementFailureCount 增加用户失败次数
+func (ahm *AccessHashManager) incrementFailureCount(userID int64) {
+	ahm.failureMutex.Lock()
+	defer ahm.failureMutex.Unlock()
+	ahm.failureCount[userID]++
+}
+
+// resetFailureCount 重置用户失败次数
+func (ahm *AccessHashManager) resetFailureCount(userID int64) {
+	ahm.failureMutex.Lock()
+	defer ahm.failureMutex.Unlock()
+	delete(ahm.failureCount, userID)
+}
+
+// ClearUserCache 清除特定用户的缓存
+func (ahm *AccessHashManager) ClearUserCache(userID int64) {
+	ahm.mutex.Lock()
+	defer ahm.mutex.Unlock()
+	delete(ahm.userCache, userID)
+	ahm.resetFailureCount(userID)
+	logger.Infof("已清除用户%d的缓存", userID)
 }
