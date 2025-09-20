@@ -320,10 +320,7 @@ func (asp *AutoSendPlugin) loadTasks() error {
 
 		// 如果NextRun为空或已过期，重新计算
 		if task.NextRun.IsZero() || task.NextRun.Before(time.Now()) {
-			parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-			if schedule, err := parser.Parse(task.CronExpr); err == nil {
-				task.NextRun = schedule.Next(time.Now())
-			}
+			task.NextRun = asp.calculateNextRunTime(task.CronExpr)
 		}
 
 		// 添加到cron调度器
@@ -561,6 +558,8 @@ func (asp *AutoSendPlugin) handleAutoSend(ctx *command.CommandContext) error {
 		return asp.handleClear(ctx)
 	case "stats":
 		return asp.handleStats(ctx)
+	case "next":
+		return asp.handleNext(ctx)
 	case "help":
 		return asp.sendHelp(ctx)
 	default:
@@ -601,9 +600,7 @@ func (asp *AutoSendPlugin) handleAdd(ctx *command.CommandContext) error {
 	chatID := ctx.Message.ChatID
 
 	// 计算下次运行时间（用于显示，实际调度由cron管理）
-	cronParser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	schedule, _ := cronParser.Parse(cronExpr)
-	nextRun := schedule.Next(time.Now())
+	nextRun := asp.calculateNextRunTime(cronExpr)
 
 	result, err := asp.db.Exec(`
 		INSERT INTO autosend_tasks (chat_id, message, cron_expr, enabled, next_run)
@@ -746,6 +743,19 @@ func (asp *AutoSendPlugin) parseFlexibleTimeString(timeStr string) (time.Time, e
 	return time.Time{}, fmt.Errorf("unable to parse time string: %s", timeStr)
 }
 
+// calculateNextRunTime 动态计算下次运行时间
+func (asp *AutoSendPlugin) calculateNextRunTime(cronExpr string) time.Time {
+	parser := cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	schedule, err := parser.Parse(cronExpr)
+	if err != nil {
+		// 如果解析失败，返回当前时间（表示无法计算）
+		return time.Now()
+	}
+
+	// 计算从当前时间开始的下次运行时间
+	return schedule.Next(time.Now())
+}
+
 // handleList 处理列出任务
 func (asp *AutoSendPlugin) handleList(ctx *command.CommandContext) error {
 	asp.tasksMutex.RLock()
@@ -767,11 +777,16 @@ func (asp *AutoSendPlugin) handleList(ctx *command.CommandContext) error {
 		// 获取聊天信息
 		chatInfo := asp.getChatInfo(task.ChatID)
 
+		// 动态计算下次运行时间
+		nextRunTime := asp.calculateNextRunTime(task.CronExpr)
+		relativeTime := asp.formatRelativeTime(nextRunTime, time.Now())
+
 		response.WriteString(fmt.Sprintf("ID: %d %s\n", task.ID, status))
 		response.WriteString(fmt.Sprintf("发送到: %s\n", chatInfo))
 		response.WriteString(fmt.Sprintf("Cron表达式: %s\n", task.CronExpr))
 		response.WriteString(fmt.Sprintf("消息: %s\n", task.Message))
-		response.WriteString(fmt.Sprintf("下次运行: %s\n", task.NextRun.Format("2006-01-02 15:04:05")))
+		response.WriteString(fmt.Sprintf("下次运行: %s (%s)\n",
+			nextRunTime.Format("2006-01-02 15:04:05"), relativeTime))
 		response.WriteString(fmt.Sprintf("创建时间: %s\n", task.Created.Format("2006-01-02 15:04:05")))
 		response.WriteString("─────────────\n")
 	}
@@ -1251,6 +1266,69 @@ func (asp *AutoSendPlugin) handleStats(ctx *command.CommandContext) error {
 	return asp.sendResponse(ctx, response.String())
 }
 
+// handleNext 处理显示下次运行时间命令
+func (asp *AutoSendPlugin) handleNext(ctx *command.CommandContext) error {
+	asp.tasksMutex.RLock()
+	defer asp.tasksMutex.RUnlock()
+
+	if len(asp.tasks) == 0 {
+		return asp.sendResponse(ctx, "当前没有自动发送任务")
+	}
+
+	var response strings.Builder
+	response.WriteString("⏰ 任务下次运行时间:\n\n")
+
+	now := time.Now()
+	for _, task := range asp.tasks {
+		if !task.Enabled {
+			continue
+		}
+
+		// 动态计算下次运行时间
+		nextRunTime := asp.calculateNextRunTime(task.CronExpr)
+
+		// 计算相对时间
+		relativeTime := asp.formatRelativeTime(nextRunTime, now)
+
+		// 获取聊天信息
+		chatInfo := asp.getChatInfo(task.ChatID)
+
+		response.WriteString(fmt.Sprintf("ID: %d\n", task.ID))
+		response.WriteString(fmt.Sprintf("发送到: %s\n", chatInfo))
+		response.WriteString(fmt.Sprintf("Cron表达式: %s\n", task.CronExpr))
+		response.WriteString(fmt.Sprintf("下次运行: %s (%s)\n",
+			nextRunTime.Format("2006-01-02 15:04:05"), relativeTime))
+		response.WriteString(fmt.Sprintf("消息: %s\n", task.Message))
+		response.WriteString("─────────────\n")
+	}
+
+	return asp.sendResponse(ctx, response.String())
+}
+
+// formatRelativeTime 格式化相对时间
+func (asp *AutoSendPlugin) formatRelativeTime(target, now time.Time) string {
+	duration := target.Sub(now)
+
+	if duration < 0 {
+		return "已过期"
+	}
+
+	seconds := int(duration.Seconds())
+	minutes := seconds / 60
+	hours := minutes / 60
+	days := hours / 24
+
+	if days > 0 {
+		return fmt.Sprintf("%d天后", days)
+	} else if hours > 0 {
+		return fmt.Sprintf("%d小时后", hours)
+	} else if minutes > 0 {
+		return fmt.Sprintf("%d分钟后", minutes)
+	} else {
+		return fmt.Sprintf("%d秒后", seconds)
+	}
+}
+
 // sendHelp 发送帮助信息
 func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 	helpMsg := `🤖 AutoSend 定时发送插件帮助
@@ -1258,6 +1336,7 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 📝 基本命令:
 • .autosend add <秒> <分> <时> <日> <月> <周> <消息内容> - 创建定时发送任务
 • .autosend list - 列出所有任务
+• .autosend next - 显示任务下次运行时间（含相对时间）
 • .autosend remove <ID> - 删除任务
 • .autosend enable <ID> - 启用任务
 • .autosend disable <ID> - 禁用任务
