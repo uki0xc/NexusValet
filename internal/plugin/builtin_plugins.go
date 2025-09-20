@@ -208,6 +208,7 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 • .autosend <命令> - 基于cron表达式的定时发送
 • .as <命令> - autosend简写命令
 • .dme [数量] - 删除当前对话中您发送的特定数量消息
+• .ids [用户ID/用户名] - 查询用户ID信息，包括等级、DC位置等
 
 💡 提示: 使用 .help core 或 .help autosend 查看详细信息
 🚀 新版本: 现在使用Go插件系统，性能更佳！`
@@ -549,6 +550,78 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 			}
 			return err
 		}
+	} else if pluginName == "ids" {
+		idsHelp := `🆔 Ids 用户信息查询插件详细帮助
+
+🆔 .ids 命令:
+  查询用户ID信息，包括等级、DC位置等，功能包括:
+         • 🎯 支持多种用户指定方式
+         • 📊 显示用户等级估算
+         • 🌍 显示DC位置信息
+         • 🔗 生成用户链接
+
+📝 使用方法:
+  • .ids - 查询自己的信息
+  • .ids <用户ID> - 通过用户ID查询
+  • .ids @<用户名> - 通过用户名查询
+  • .ids <用户名> - 通过用户名查询（无需@符号）
+  • .ids - 回复消息查询该用户信息（推荐）
+
+📋 显示信息:
+  • ID: 用户唯一标识符
+  • DC: 数据中心编号和位置（自己查询显示真实DC，其他用户通过头像获取）
+  • 昵称: 用户显示名称（可点击）
+  • 等级: 基于ID范围的等级估算
+  • 用户名: Telegram用户名
+  • TG链接: 用户链接
+
+🎯 等级系统 (游戏风格):
+  • 👑 终极BOSS (无敌存在): ID < 50,000,000
+  • 🌌 创世之神 (开天辟地): 50,000,000 ≤ ID < 100,000,000
+  • ⚡ 神话至尊 (威震寰宇): 100,000,000 ≤ ID < 500,000,000
+  • 🔥 史诗霸主 (独霸一方): 500,000,000 ≤ ID < 1,000,000,000
+  • 🌟 传奇英雄 (威震八方): 1,000,000,000 ≤ ID < 2,075,484,114
+  • 👑 王者传说 (名震天下): 2,075,484,114 ≤ ID < 3,000,000,000
+  • 💎 钻石大师 (威名远扬): 3,000,000,000 ≤ ID < 4,000,000,000
+  • 🏆 黄金勇者 (声名鹊起): 4,000,000,000 ≤ ID < 5,000,000,000
+  • 🛡️ 白银骑士 (小有名气): 5,000,000,000 ≤ ID < 6,000,000,000
+  • ⚔️ 青铜战士 (初出茅庐): 6,000,000,000 ≤ ID < 7,000,000,000
+  • 🆕 新手村村民 (刚入坑): ID ≥ 7,000,000,000
+
+🔌 插件信息:
+  • 名称: ids
+  • 版本: v1.0.0
+  • 作者: NexusValet
+         • 描述: 查询用户ID信息，包括等级、DC位置等`
+
+		// 直接使用gotd API发送响应
+		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve peer: %w", err)
+		}
+
+		if ctx.Message.ChatID > 0 {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: idsHelp,
+			})
+			return err
+		} else {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: idsHelp,
+			})
+			if err != nil {
+				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
+					Peer:     peer,
+					Message:  idsHelp,
+					RandomID: time.Now().UnixNano(),
+				})
+			}
+			return err
+		}
 	}
 
 	// 直接使用gotd API发送响应
@@ -829,6 +902,12 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	dmePlugin := NewDeleteMyMessagesPlugin()
 	if err := manager.RegisterPlugin(dmePlugin); err != nil {
 		return fmt.Errorf("failed to register DeleteMyMessages plugin: %w", err)
+	}
+
+	// 注册Ids插件
+	idsPlugin := NewIdsPlugin()
+	if err := manager.RegisterPlugin(idsPlugin); err != nil {
+		return fmt.Errorf("failed to register Ids plugin: %w", err)
 	}
 
 	logger.Infof("All builtin plugins registered successfully")

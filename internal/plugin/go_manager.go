@@ -249,5 +249,10 @@ func (gm *GoManager) SetTelegramClient(client *tg.Client) {
 			dmePlugin.SetTelegramClient(client)
 			logger.Debugf("Set Telegram client for DeleteMyMessages plugin %s", name)
 		}
+		// 检查插件是否是IdsPlugin类型
+		if idsPlugin, ok := plugin.(*IdsPlugin); ok {
+			idsPlugin.SetTelegramClient(client)
+			logger.Debugf("Set Telegram client for Ids plugin %s", name)
+		}
 	}
 }
