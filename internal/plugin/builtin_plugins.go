@@ -209,6 +209,8 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 • .as <命令> - autosend简写命令
 • .dme [数量] - 删除当前对话中您发送的特定数量消息
 • .ids [用户ID/用户名] - 查询用户ID信息，包括等级、DC位置等
+• .getstickers - 获取整个贴纸包的贴纸
+• .gs - 获取整个贴纸包的贴纸(简写)
 
 💡 提示: 使用 .help core 或 .help autosend 查看详细信息
 🚀 新版本: 现在使用Go插件系统，性能更佳！`
@@ -622,6 +624,74 @@ func (cp *CoreCommandsPlugin) handleHelp(ctx *command.CommandContext) error {
 			}
 			return err
 		}
+	} else if pluginName == "sticker" {
+		stickerHelp := `🎭 Sticker 贴纸包下载插件详细帮助
+
+🎭 .getstickers / .gs 命令:
+  获取整个贴纸包的贴纸，功能包括:
+  • 📦 下载整个贴纸包的所有贴纸
+  • 🎨 保持贴纸的emoji表情信息
+  • 📁 自动打包为ZIP文件
+  • 🚀 支持多种贴纸格式(webp/tgs/mp4)
+  • 📋 生成pack.txt配置文件
+
+📝 使用方法:
+  • .getstickers - 回复贴纸包中的任意贴纸
+  • .gs - 简写命令，功能同上
+
+✨ 功能特色:
+  • 🎯 自动识别贴纸包中的所有贴纸
+  • 🎨 保留每个贴纸对应的emoji表情
+  • 📦 自动打包为ZIP文件便于分享
+  • 🚀 支持静态贴纸(webp)、动画贴纸(tgs)、视频贴纸(mp4)
+  • 📋 生成pack.txt文件，包含贴纸文件名和emoji映射
+  • ⚡ 高效并发下载，快速完成
+
+📋 输出文件:
+  • 贴纸文件: 001.webp, 002.tgs, 003.mp4 等
+  • 配置文件: pack.txt (包含文件名和emoji映射)
+  • 打包文件: 贴纸包名.zip
+
+⚠️ 注意事项:
+  • 需要回复贴纸包中的贴纸
+  • 贴纸必须属于某个贴纸包
+  • 下载过程可能需要一些时间
+  • 大贴纸包可能需要更多时间处理
+
+🔌 插件信息:
+  • 名称: sticker
+  • 版本: v1.0.0
+  • 作者: NexusValet
+  • 描述: 获取整个贴纸包的贴纸插件`
+
+		// 直接使用gotd API发送响应
+		peer, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve peer: %w", err)
+		}
+
+		if ctx.Message.ChatID > 0 {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: stickerHelp,
+			})
+			return err
+		} else {
+			_, err = ctx.API.MessagesEditMessage(ctx.Context, &tg.MessagesEditMessageRequest{
+				Peer:    peer,
+				ID:      ctx.Message.Message.ID,
+				Message: stickerHelp,
+			})
+			if err != nil {
+				_, err = ctx.API.MessagesSendMessage(ctx.Context, &tg.MessagesSendMessageRequest{
+					Peer:     peer,
+					Message:  stickerHelp,
+					RandomID: time.Now().UnixNano(),
+				})
+			}
+			return err
+		}
 	}
 
 	// 直接使用gotd API发送响应
@@ -908,6 +978,12 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	idsPlugin := NewIdsPlugin()
 	if err := manager.RegisterPlugin(idsPlugin); err != nil {
 		return fmt.Errorf("failed to register Ids plugin: %w", err)
+	}
+
+	// 注册Sticker插件
+	stickerPlugin := NewStickerPlugin()
+	if err := manager.RegisterPlugin(stickerPlugin); err != nil {
+		return fmt.Errorf("failed to register Sticker plugin: %w", err)
 	}
 
 	logger.Infof("All builtin plugins registered successfully")
