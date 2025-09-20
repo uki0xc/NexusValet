@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"nexusvalet/pkg/logger"
 	"sync"
@@ -23,6 +24,7 @@ type UserInfo struct {
 // AccessHashManager 管理用户的access_hash缓存
 type AccessHashManager struct {
 	api       *tg.Client
+	db        *sql.DB
 	userCache map[int64]*UserInfo
 	mutex     sync.RWMutex
 	// 缓存过期时间（12小时，更保守的设置）
@@ -30,6 +32,8 @@ type AccessHashManager struct {
 	// 失败重试计数
 	failureCount map[int64]int
 	failureMutex sync.RWMutex
+	// 是否启用持久化
+	persistent bool
 }
 
 // NewAccessHashManager 创建新的AccessHashManager
@@ -39,7 +43,33 @@ func NewAccessHashManager(api *tg.Client) *AccessHashManager {
 		userCache:    make(map[int64]*UserInfo),
 		cacheExpiry:  12 * time.Hour, // 更保守的缓存时间
 		failureCount: make(map[int64]int),
+		persistent:   false,
 	}
+}
+
+// NewAccessHashManagerWithDB 创建带数据库持久化的AccessHashManager
+func NewAccessHashManagerWithDB(api *tg.Client, db *sql.DB) *AccessHashManager {
+	ahm := &AccessHashManager{
+		api:          api,
+		db:           db,
+		userCache:    make(map[int64]*UserInfo),
+		cacheExpiry:  12 * time.Hour, // 更保守的缓存时间
+		failureCount: make(map[int64]int),
+		persistent:   true,
+	}
+
+	// 初始化数据库表
+	if err := ahm.initDatabase(); err != nil {
+		logger.Errorf("Failed to initialize access_hash database: %v", err)
+		ahm.persistent = false
+	} else {
+		// 从数据库加载缓存
+		if err := ahm.loadFromDatabase(); err != nil {
+			logger.Errorf("Failed to load access_hash from database: %v", err)
+		}
+	}
+
+	return ahm
 }
 
 // GetUserPeer 获取用户的InputPeerUser，自动处理access_hash
@@ -397,6 +427,14 @@ func (ahm *AccessHashManager) cacheUser(user *tg.User) *UserInfo {
 	}
 
 	ahm.userCache[user.ID] = userInfo
+
+	// 如果启用持久化，保存到数据库
+	if ahm.persistent {
+		if err := ahm.saveToDatabase(userInfo); err != nil {
+			logger.Errorf("Failed to save user %d to database: %v", user.ID, err)
+		}
+	}
+
 	return userInfo
 }
 
@@ -461,5 +499,129 @@ func (ahm *AccessHashManager) ClearUserCache(userID int64) {
 	defer ahm.mutex.Unlock()
 	delete(ahm.userCache, userID)
 	ahm.resetFailureCount(userID)
+
+	// 如果启用持久化，也从数据库删除
+	if ahm.persistent && ahm.db != nil {
+		_, err := ahm.db.Exec("DELETE FROM access_hash_cache WHERE user_id = ?", userID)
+		if err != nil {
+			logger.Errorf("Failed to delete user %d from database: %v", userID, err)
+		}
+	}
+
 	logger.Infof("已清除用户%d的缓存", userID)
+}
+
+// initDatabase 初始化数据库表
+func (ahm *AccessHashManager) initDatabase() error {
+	if ahm.db == nil {
+		return fmt.Errorf("database not available")
+	}
+
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS access_hash_cache (
+		user_id INTEGER PRIMARY KEY,
+		access_hash INTEGER NOT NULL,
+		username TEXT,
+		first_name TEXT,
+		last_name TEXT,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	_, err := ahm.db.Exec(createTableSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create access_hash_cache table: %w", err)
+	}
+
+	logger.Infof("Access hash cache table initialized")
+	return nil
+}
+
+// loadFromDatabase 从数据库加载缓存
+func (ahm *AccessHashManager) loadFromDatabase() error {
+	if ahm.db == nil {
+		return fmt.Errorf("database not available")
+	}
+
+	rows, err := ahm.db.Query(`
+		SELECT user_id, access_hash, username, first_name, last_name, updated_at
+		FROM access_hash_cache
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query access_hash_cache: %w", err)
+	}
+	defer rows.Close()
+
+	ahm.mutex.Lock()
+	defer ahm.mutex.Unlock()
+
+	loadedCount := 0
+	for rows.Next() {
+		var userInfo UserInfo
+		var updatedAtStr string
+
+		err := rows.Scan(&userInfo.ID, &userInfo.AccessHash, &userInfo.Username,
+			&userInfo.FirstName, &userInfo.LastName, &updatedAtStr)
+		if err != nil {
+			logger.Errorf("Failed to scan user info: %v", err)
+			continue
+		}
+
+		// 解析时间
+		if t, err := time.Parse("2006-01-02 15:04:05", updatedAtStr); err == nil {
+			userInfo.UpdatedAt = t
+		} else {
+			userInfo.UpdatedAt = time.Now()
+		}
+
+		// 检查是否过期
+		if time.Since(userInfo.UpdatedAt) <= ahm.cacheExpiry {
+			ahm.userCache[userInfo.ID] = &userInfo
+			loadedCount++
+		}
+	}
+
+	logger.Infof("Loaded %d access_hash entries from database", loadedCount)
+	return nil
+}
+
+// saveToDatabase 保存用户信息到数据库
+func (ahm *AccessHashManager) saveToDatabase(userInfo *UserInfo) error {
+	if !ahm.persistent || ahm.db == nil {
+		return nil
+	}
+
+	_, err := ahm.db.Exec(`
+		INSERT OR REPLACE INTO access_hash_cache 
+		(user_id, access_hash, username, first_name, last_name, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, userInfo.ID, userInfo.AccessHash, userInfo.Username,
+		userInfo.FirstName, userInfo.LastName, userInfo.UpdatedAt.Format("2006-01-02 15:04:05"))
+
+	if err != nil {
+		return fmt.Errorf("failed to save user info to database: %w", err)
+	}
+
+	return nil
+}
+
+// CleanExpiredFromDatabase 清理数据库中的过期记录
+func (ahm *AccessHashManager) CleanExpiredFromDatabase() error {
+	if !ahm.persistent || ahm.db == nil {
+		return nil
+	}
+
+	expiredTime := time.Now().Add(-ahm.cacheExpiry)
+	result, err := ahm.db.Exec(`
+		DELETE FROM access_hash_cache WHERE updated_at < ?
+	`, expiredTime.Format("2006-01-02 15:04:05"))
+
+	if err != nil {
+		return fmt.Errorf("failed to clean expired records: %w", err)
+	}
+
+	if rowsAffected, err := result.RowsAffected(); err == nil && rowsAffected > 0 {
+		logger.Infof("Cleaned %d expired access_hash records from database", rowsAffected)
+	}
+
+	return nil
 }

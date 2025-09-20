@@ -808,7 +808,7 @@ func RegisterBuiltinPlugins(manager *GoManager) error {
 	}
 
 	// 注册SB插件
-	sbPlugin := NewSBPlugin()
+	sbPlugin := NewSBPlugin(manager.GetDatabase())
 	if err := manager.RegisterPlugin(sbPlugin); err != nil {
 		return fmt.Errorf("failed to register SB plugin: %w", err)
 	}

@@ -98,7 +98,8 @@ func (asp *AutoSendPlugin) Shutdown(ctx context.Context) error {
 func (asp *AutoSendPlugin) SetTelegramClient(client *tg.Client, peerResolver *peers.Resolver) {
 	asp.telegramAPI = client
 	asp.peerResolver = peerResolver
-	asp.accessHashManager = NewAccessHashManager(client)
+	// 使用带数据库持久化的AccessHashManager
+	asp.accessHashManager = NewAccessHashManagerWithDB(client, asp.db)
 }
 
 // RegisterCommands 注册命令
@@ -134,7 +135,27 @@ func (asp *AutoSendPlugin) initDatabase() error {
 		);
 		`
 		_, err = asp.db.Exec(createTableSQL)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// 创建任务失败记录表
+		createFailureTableSQL := `
+		CREATE TABLE autosend_task_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			last_failure DATETIME,
+			last_error TEXT,
+			FOREIGN KEY (task_id) REFERENCES autosend_tasks (id) ON DELETE CASCADE
+		);
+		`
+		_, err = asp.db.Exec(createFailureTableSQL)
+		if err != nil {
+			return err
+		}
+
+		return nil
 	} else {
 		// 检查是否需要添加新列或迁移数据
 		rows, err := asp.db.Query("PRAGMA table_info(autosend_tasks)")
@@ -468,24 +489,49 @@ func (asp *AutoSendPlugin) handleFailedTask(task *AutoSendTask) {
 		logger.Infof("Cleared AccessHash cache for user %d due to task failure", task.ChatID)
 	}
 
-	// 自动禁用连续失败的任务（避免持续错误）
-	asp.tasksMutex.Lock()
-	defer asp.tasksMutex.Unlock()
+	// 不再自动禁用任务，而是记录失败并继续尝试
+	// 这样可以避免因为临时的网络问题或AccessHash失效而永久停止任务
+	logger.Warnf("Task %d (chat %d) will continue to retry despite failures", task.ID, task.ChatID)
 
-	// 从cron调度器移除
-	if task.cronID != 0 {
-		asp.cronScheduler.Remove(task.cronID)
-		task.cronID = 0
+	// 可选：增加失败计数到数据库，用于监控
+	asp.recordTaskFailure(task.ID)
+}
+
+// recordTaskFailure 记录任务失败
+func (asp *AutoSendPlugin) recordTaskFailure(taskID int64) {
+	// 检查失败记录表是否存在
+	var count int
+	err := asp.db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='autosend_task_failures'").Scan(&count)
+	if err != nil || count == 0 {
+		// 表不存在，创建它
+		createFailureTableSQL := `
+		CREATE TABLE IF NOT EXISTS autosend_task_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			task_id INTEGER NOT NULL,
+			failure_count INTEGER NOT NULL DEFAULT 0,
+			last_failure DATETIME,
+			last_error TEXT,
+			FOREIGN KEY (task_id) REFERENCES autosend_tasks (id) ON DELETE CASCADE
+		);
+		`
+		_, err = asp.db.Exec(createFailureTableSQL)
+		if err != nil {
+			logger.Errorf("Failed to create failure table: %v", err)
+			return
+		}
 	}
 
-	// 更新数据库状态
-	_, err := asp.db.Exec("UPDATE autosend_tasks SET enabled = 0 WHERE id = ?", task.ID)
+	// 更新或插入失败记录
+	_, err = asp.db.Exec(`
+		INSERT OR REPLACE INTO autosend_task_failures 
+		(task_id, failure_count, last_failure, last_error)
+		VALUES (?, 
+			COALESCE((SELECT failure_count FROM autosend_task_failures WHERE task_id = ?), 0) + 1,
+			?, ?)
+	`, taskID, taskID, time.Now().Format("2006-01-02 15:04:05"), "Task execution failed")
+
 	if err != nil {
-		logger.Errorf("Failed to disable failed task %d: %v", task.ID, err)
-	} else {
-		// 更新内存状态
-		task.Enabled = false
-		logger.Infof("Auto-disabled failed task %d (chat %d)", task.ID, task.ChatID)
+		logger.Errorf("Failed to record task failure for task %d: %v", taskID, err)
 	}
 }
 
@@ -513,6 +559,8 @@ func (asp *AutoSendPlugin) handleAutoSend(ctx *command.CommandContext) error {
 		return asp.handleResolve(ctx)
 	case "clear":
 		return asp.handleClear(ctx)
+	case "stats":
+		return asp.handleStats(ctx)
 	case "help":
 		return asp.sendHelp(ctx)
 	default:
@@ -1105,6 +1153,104 @@ func (asp *AutoSendPlugin) handleClear(ctx *command.CommandContext) error {
 	return asp.sendResponse(ctx, response)
 }
 
+// handleStats 处理统计信息命令
+func (asp *AutoSendPlugin) handleStats(ctx *command.CommandContext) error {
+	var response strings.Builder
+	response.WriteString("📊 AutoSend 任务统计信息:\n\n")
+
+	// 基本统计
+	asp.tasksMutex.RLock()
+	totalTasks := len(asp.tasks)
+	enabledTasks := 0
+	for _, task := range asp.tasks {
+		if task.Enabled {
+			enabledTasks++
+		}
+	}
+	asp.tasksMutex.RUnlock()
+
+	response.WriteString(fmt.Sprintf("• 总任务数: %d\n", totalTasks))
+	response.WriteString(fmt.Sprintf("• 启用任务: %d\n", enabledTasks))
+	response.WriteString(fmt.Sprintf("• 禁用任务: %d\n", totalTasks-enabledTasks))
+
+	// 失败统计
+	rows, err := asp.db.Query(`
+		SELECT t.id, t.chat_id, t.message, f.failure_count, f.last_failure, f.last_error
+		FROM autosend_tasks t
+		LEFT JOIN autosend_task_failures f ON t.id = f.task_id
+		WHERE f.failure_count > 0
+		ORDER BY f.failure_count DESC
+		LIMIT 10
+	`)
+	if err != nil {
+		response.WriteString("\n⚠️ 无法获取失败统计信息\n")
+	} else {
+		defer rows.Close()
+
+		var failedTasks []struct {
+			ID           int64
+			ChatID       int64
+			Message      string
+			FailureCount int
+			LastFailure  string
+			LastError    string
+		}
+
+		for rows.Next() {
+			var task struct {
+				ID           int64
+				ChatID       int64
+				Message      string
+				FailureCount int
+				LastFailure  string
+				LastError    string
+			}
+			var lastFailure, lastError sql.NullString
+
+			err := rows.Scan(&task.ID, &task.ChatID, &task.Message, &task.FailureCount, &lastFailure, &lastError)
+			if err != nil {
+				continue
+			}
+
+			if lastFailure.Valid {
+				task.LastFailure = lastFailure.String
+			}
+			if lastError.Valid {
+				task.LastError = lastError.String
+			}
+
+			failedTasks = append(failedTasks, task)
+		}
+
+		if len(failedTasks) > 0 {
+			response.WriteString(fmt.Sprintf("\n❌ 失败任务统计 (前%d个):\n", len(failedTasks)))
+			for _, task := range failedTasks {
+				chatInfo := asp.getChatInfo(task.ChatID)
+				response.WriteString(fmt.Sprintf("• 任务ID: %d\n", task.ID))
+				response.WriteString(fmt.Sprintf("  聊天: %s\n", chatInfo))
+				response.WriteString(fmt.Sprintf("  失败次数: %d\n", task.FailureCount))
+				if task.LastFailure != "" {
+					response.WriteString(fmt.Sprintf("  最后失败: %s\n", task.LastFailure))
+				}
+				response.WriteString("  ─────────────\n")
+			}
+		} else {
+			response.WriteString("\n✅ 没有失败的任务\n")
+		}
+	}
+
+	// AccessHash缓存统计
+	if asp.accessHashManager != nil {
+		total, expired := asp.accessHashManager.GetCacheStats()
+		response.WriteString("\n🔑 AccessHash缓存统计:\n")
+		response.WriteString(fmt.Sprintf("• 缓存用户数: %d\n", total))
+		response.WriteString(fmt.Sprintf("• 过期缓存: %d\n", expired))
+		response.WriteString(fmt.Sprintf("• 有效缓存: %d\n", total-expired))
+	}
+
+	return asp.sendResponse(ctx, response.String())
+}
+
 // sendHelp 发送帮助信息
 func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 	helpMsg := `🤖 AutoSend 定时发送插件帮助
@@ -1118,6 +1264,7 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 • .autosend check - 检查所有任务的有效性
 • .autosend resolve <用户ID> - 解析用户/机器人的AccessHash
 • .autosend clear <用户ID> - 清除用户AccessHash缓存
+• .autosend stats - 查看任务统计和失败信息
 
 📋 Cron表达式格式: 秒 分 时 日 月 周
 • 每天0点: 0 0 0 * * *
@@ -1143,13 +1290,15 @@ func (asp *AutoSendPlugin) sendHelp(ctx *command.CommandContext) error {
 • 任务会在当前聊天中执行
 • 重启后任务会自动恢复
 • 使用.as作为简写命令
+• AccessHash现在会持久化保存，重启后不会丢失
 
 🔧 故障排除:
 • 如果任务失败显示"PEER_ID_INVALID"，说明AccessHash已失效
 • 使用 .autosend clear <用户ID> 清除缓存
 • 重新发送消息给该用户/机器人
 • 使用 .autosend resolve <用户ID> 重新解析
-• 任务连续失败3次会自动禁用
+• 任务失败后不会自动禁用，会继续重试
+• 使用 .autosend stats 查看失败统计信息
 
 🔌 插件信息:
 • 名称: autosend

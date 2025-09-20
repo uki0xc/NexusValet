@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"nexusvalet/internal/command"
 	"nexusvalet/pkg/logger"
@@ -15,11 +16,12 @@ import (
 // SBPlugin 超级封禁插件
 type SBPlugin struct {
 	*BasePlugin
+	db                *sql.DB
 	accessHashManager *AccessHashManager
 }
 
 // NewSBPlugin 创建超级封禁插件
-func NewSBPlugin() *SBPlugin {
+func NewSBPlugin(db *sql.DB) *SBPlugin {
 	info := &PluginInfo{
 		PluginVersion: &PluginVersion{
 			Name:        "sb",
@@ -33,7 +35,8 @@ func NewSBPlugin() *SBPlugin {
 
 	return &SBPlugin{
 		BasePlugin: NewBasePlugin(info),
-		// accessHashManager 将在Initialize中设置
+		db:         db,
+		// accessHashManager 将在SetTelegramClient中设置
 	}
 }
 
@@ -52,8 +55,9 @@ func (sp *SBPlugin) Initialize(ctx context.Context, manager interface{}) error {
 
 // SetTelegramClient 设置Telegram客户端并初始化AccessHashManager
 func (sp *SBPlugin) SetTelegramClient(client *tg.Client) {
-	sp.accessHashManager = NewAccessHashManager(client)
-	logger.Infof("SB插件AccessHashManager已初始化")
+	// 使用带数据库持久化的AccessHashManager
+	sp.accessHashManager = NewAccessHashManagerWithDB(client, sp.db)
+	logger.Infof("SB插件AccessHashManager已初始化（带持久化）")
 }
 
 // RegisterCommands 实现CommandPlugin接口
