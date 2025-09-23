@@ -16,8 +16,7 @@ import (
 // SBPlugin 超级封禁插件
 type SBPlugin struct {
 	*BasePlugin
-	db                *sql.DB
-	accessHashManager *AccessHashManager
+	db *sql.DB
 }
 
 // NewSBPlugin 创建超级封禁插件
@@ -36,7 +35,6 @@ func NewSBPlugin(db *sql.DB) *SBPlugin {
 	return &SBPlugin{
 		BasePlugin: NewBasePlugin(info),
 		db:         db,
-		// accessHashManager 将在SetTelegramClient中设置
 	}
 }
 
@@ -47,18 +45,11 @@ func (sp *SBPlugin) Initialize(ctx context.Context, manager interface{}) error {
 		return err
 	}
 
-	// 这里需要获取Telegram API客户端来初始化AccessHashManager
-	// 我们将在后续的集成中处理这个
-
 	return nil
 }
 
-// SetTelegramClient 设置Telegram客户端并初始化AccessHashManager
-func (sp *SBPlugin) SetTelegramClient(client *tg.Client) {
-	// 使用带数据库持久化的AccessHashManager
-	sp.accessHashManager = NewAccessHashManagerWithDB(client, sp.db)
-	logger.Infof("SB插件AccessHashManager已初始化（带持久化）")
-}
+// SetTelegramClient 保持兼容接口（不再在插件内部管理 access_hash）
+func (sp *SBPlugin) SetTelegramClient(client *tg.Client) {}
 
 // RegisterCommands 实现CommandPlugin接口
 func (sp *SBPlugin) RegisterCommands(parser *command.Parser) error {
@@ -316,12 +307,6 @@ func (sp *SBPlugin) handleUserBan(ctx *command.CommandContext, uid int64, delete
 
 // banUserInGroupWithError 在指定群组中封禁用户，返回详细错误信息
 func (sp *SBPlugin) banUserInGroupWithError(ctx *command.CommandContext, peer tg.InputPeerClass, uid int64, deleteAll bool) (bool, error) {
-	// 检查AccessHashManager是否已初始化
-	if sp.accessHashManager == nil {
-		logger.Errorf("AccessHashManager未初始化")
-		return false, fmt.Errorf("AccessHashManager未初始化")
-	}
-
 	// 转换为ChannelClass
 	var channelPeer tg.InputChannelClass
 	switch p := peer.(type) {
@@ -332,40 +317,14 @@ func (sp *SBPlugin) banUserInGroupWithError(ctx *command.CommandContext, peer tg
 		return false, fmt.Errorf("不支持的群组类型")
 	}
 
-	// 使用AccessHashManager获取用户Peer
-	var userPeer *tg.InputPeerUser
-	var err error
-
-	// 优先方法：如果是回复消息，从消息中获取用户信息
-	if ctx.Message.Message.ReplyTo != nil {
-		if replyTo, ok := ctx.Message.Message.ReplyTo.(*tg.MessageReplyHeader); ok {
-			userPeer, err = sp.accessHashManager.GetUserPeerFromMessage(ctx.Context, peer, replyTo.ReplyToMsgID, uid)
-			if err != nil {
-				logger.Warnf("从回复消息获取用户%d失败: %v", uid, err)
-			} else {
-				logger.Infof("从回复消息成功获取用户%d的access_hash", uid)
-			}
-		}
+	// 统一通过 Resolver，带频道上下文回退策略解析用户
+	userPeerGeneric, err := ctx.PeerResolver.ResolveUserInChannel(ctx.Context, channelPeer, uid)
+	if err != nil {
+		return false, fmt.Errorf("解析用户失败: %v", err)
 	}
-
-	// 回退方法1：尝试从群组参与者中获取
-	if userPeer == nil {
-		userPeer, err = sp.accessHashManager.GetUserPeerFromParticipant(ctx.Context, channelPeer, uid)
-		if err != nil {
-			logger.Warnf("从群组参与者获取用户%d失败: %v", uid, err)
-		} else {
-			logger.Infof("从群组参与者成功获取用户%d的access_hash", uid)
-		}
-	}
-
-	// 回退方法2：使用带回退策略的获取方法
-	if userPeer == nil {
-		userPeer, err = sp.accessHashManager.GetUserPeerWithFallback(ctx.Context, uid, channelPeer)
-		if err != nil {
-			logger.Errorf("所有方法都失败，无法获取用户%d: %v", uid, err)
-			return false, fmt.Errorf("无法获取用户信息: %v", err)
-		}
-		logger.Infof("通过回退策略获取用户%d的access_hash: %d", uid, userPeer.AccessHash)
+	userPeer, ok := userPeerGeneric.(*tg.InputPeerUser)
+	if !ok {
+		return false, fmt.Errorf("解析到的对等体不是用户类型")
 	}
 
 	// 封禁用户
@@ -411,11 +370,6 @@ func (sp *SBPlugin) banUserInGroup(ctx *command.CommandContext, peer tg.InputPee
 
 // deleteUserHistory 删除用户消息历史
 func (sp *SBPlugin) deleteUserHistory(ctx *command.CommandContext, peer tg.InputPeerClass, uid int64) {
-	if sp.accessHashManager == nil {
-		logger.Warnf("AccessHashManager未初始化，跳过删除消息历史")
-		return
-	}
-
 	// 转换为ChannelClass
 	var channelPeer tg.InputChannelClass
 	switch p := peer.(type) {
@@ -426,11 +380,19 @@ func (sp *SBPlugin) deleteUserHistory(ctx *command.CommandContext, peer tg.Input
 		return
 	}
 
-	// 使用AccessHashManager获取用户Peer
-	userPeer, err := sp.accessHashManager.GetUserPeer(ctx.Context, uid)
+	// 统一通过 Resolver（带频道上下文）获取用户 InputPeer
+	userPeerGeneric, err := ctx.PeerResolver.ResolveUserInChannel(ctx.Context, channelPeer, uid)
+	var userPeer *tg.InputPeerUser
 	if err != nil {
-		logger.Warnf("删除消息历史时获取用户%d失败，使用默认AccessHash: %v", uid, err)
+		logger.Warnf("删除消息历史时解析用户%d失败，使用默认AccessHash: %v", uid, err)
 		userPeer = &tg.InputPeerUser{UserID: uid, AccessHash: 0}
+	} else {
+		if up, ok := userPeerGeneric.(*tg.InputPeerUser); ok {
+			userPeer = up
+		} else {
+			logger.Warnf("删除消息历史时解析到的对等体不是用户类型，使用默认AccessHash")
+			userPeer = &tg.InputPeerUser{UserID: uid, AccessHash: 0}
+		}
 	}
 
 	_, err = ctx.API.ChannelsDeleteParticipantHistory(ctx.Context, &tg.ChannelsDeleteParticipantHistoryRequest{
@@ -447,52 +409,42 @@ func (sp *SBPlugin) deleteUserHistory(ctx *command.CommandContext, peer tg.Input
 
 // getUserInfo 获取用户信息
 func (sp *SBPlugin) getUserInfo(ctx *command.CommandContext, uid int64) (*tg.User, error) {
-	// 如果AccessHashManager可用，先尝试从缓存获取
-	if sp.accessHashManager != nil {
-		if cachedInfo := sp.accessHashManager.GetCachedUserInfo(uid); cachedInfo != nil {
-			// 从缓存信息构建User对象
-			return &tg.User{
-				ID:         cachedInfo.ID,
-				AccessHash: cachedInfo.AccessHash,
-				Username:   cachedInfo.Username,
-				FirstName:  cachedInfo.FirstName,
-				LastName:   cachedInfo.LastName,
-			}, nil
-		}
-
-		// 缓存中没有，通过AccessHashManager获取
-		userPeer, err := sp.accessHashManager.GetUserPeer(ctx.Context, uid)
-		if err == nil {
-			// 通过获取到的peer再次查询完整信息
-			users, err := ctx.API.UsersGetUsers(ctx.Context, []tg.InputUserClass{
-				&tg.InputUser{UserID: userPeer.UserID, AccessHash: userPeer.AccessHash},
-			})
-			if err == nil && len(users) > 0 {
-				if user, ok := users[0].(*tg.User); ok {
-					return user, nil
-				}
-			}
-		}
-	}
-
-	// 回退到原始方法
-	users, err := ctx.API.UsersGetUsers(ctx.Context, []tg.InputUserClass{
-		&tg.InputUser{UserID: uid},
-	})
+	// 尝试通过统一 Resolver 获取用户 peer，再查询完整信息
+	userPeerGeneric, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, uid)
 	if err != nil {
-		return nil, err
+		// 回退到仅凭 ID 查询（可能失败于 access_hash 要求）
+		users, uerr := ctx.API.UsersGetUsers(ctx.Context, []tg.InputUserClass{
+			&tg.InputUser{UserID: uid},
+		})
+		if uerr != nil {
+			return nil, uerr
+		}
+		if len(users) == 0 {
+			return nil, fmt.Errorf("用户不存在")
+		}
+		user, ok := users[0].(*tg.User)
+		if !ok {
+			return nil, fmt.Errorf("用户信息格式错误")
+		}
+		return user, nil
 	}
-
-	if len(users) == 0 {
-		return nil, fmt.Errorf("用户不存在")
+	if up, ok := userPeerGeneric.(*tg.InputPeerUser); ok {
+		users, err := ctx.API.UsersGetUsers(ctx.Context, []tg.InputUserClass{
+			&tg.InputUser{UserID: up.UserID, AccessHash: up.AccessHash},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(users) == 0 {
+			return nil, fmt.Errorf("用户不存在")
+		}
+		user, ok := users[0].(*tg.User)
+		if !ok {
+			return nil, fmt.Errorf("用户信息格式错误")
+		}
+		return user, nil
 	}
-
-	user, ok := users[0].(*tg.User)
-	if !ok {
-		return nil, fmt.Errorf("用户信息格式错误")
-	}
-
-	return user, nil
+	return nil, fmt.Errorf("解析到的对等体不是用户类型")
 }
 
 // getReplyMessage 获取回复的消息

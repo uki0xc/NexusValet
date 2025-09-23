@@ -39,6 +39,7 @@ type Bot struct {
 	currentPeer   tg.InputPeerClass // 存储当前对等体用于回复
 	selfUserID    int64             // 机器人自己的用户ID
 	peerResolver  *peers.Resolver
+	accessHashMgr *plugin.AccessHashManager
 	// 存储最后处理的消息用于编辑上下文
 	lastMessage *tg.Message
 	lastUpdate  interface{} // 存储原始更新
@@ -128,10 +129,17 @@ func (b *Bot) createTelegramClient() error {
 	b.client = client
 	b.api = client.API()
 
-	// 初始化统一的 Peer 解析器
-	b.peerResolver = peers.NewResolver(b.api)
+	// 初始化 AccessHashManager（优先带数据库持久化）
+	if b.sessionMgr != nil {
+		b.accessHashMgr = plugin.NewAccessHashManagerWithDB(b.api, b.sessionMgr.GetDB())
+	} else {
+		b.accessHashMgr = plugin.NewAccessHashManager(b.api)
+	}
 
-	// Set the Telegram API for the command parser to enable file operations
+	// 初始化统一的 Peer 解析器，并注入 AccessHashManager
+	b.peerResolver = peers.NewResolver(b.accessHashMgr)
+
+	// 为命令解析器设置 Telegram API 与 PeerResolver
 	b.commandParser.SetTelegramAPI(b.api, b.peerResolver)
 
 	return nil
@@ -169,7 +177,7 @@ func (b *Bot) Start() error {
 			}
 		}
 
-		// 为插件设置Peer解析器和Telegram客户端
+		// 为插件设置 Peer 解析器和 Telegram 客户端
 		b.pluginManager.SetPeerResolver(b.peerResolver)
 		b.pluginManager.SetTelegramClient(b.api)
 

@@ -72,6 +72,28 @@ func NewAccessHashManagerWithDB(api *tg.Client, db *sql.DB) *AccessHashManager {
 	return ahm
 }
 
+// GetInputPeer 统一根据 peerID 返回可用的 tg.InputPeerClass（包含有效的 access_hash）。
+// 规则：peerID > 0 为用户；-x 为普通群；-100... 为频道/超级群。
+func (ahm *AccessHashManager) GetInputPeer(ctx context.Context, peerID int64) (tg.InputPeerClass, error) {
+	if peerID > 0 {
+		// 用户
+		userPeer, err := ahm.GetUserPeer(ctx, peerID)
+		if err != nil {
+			return nil, err
+		}
+		return userPeer, nil
+	}
+
+	// 普通群（非 -100 前缀）
+	if peerID > -1000000000000 {
+		return &tg.InputPeerChat{ChatID: -peerID}, nil
+	}
+
+	// 频道/超级群
+	channelID := -peerID - 1000000000000
+	return ahm.getChannelPeer(ctx, channelID)
+}
+
 // GetUserPeer 获取用户的InputPeerUser，自动处理access_hash
 func (ahm *AccessHashManager) GetUserPeer(ctx context.Context, userID int64) (*tg.InputPeerUser, error) {
 	// 先检查缓存
@@ -623,5 +645,70 @@ func (ahm *AccessHashManager) CleanExpiredFromDatabase() error {
 		logger.Infof("Cleaned %d expired access_hash records from database", rowsAffected)
 	}
 
+	return nil
+}
+
+// getChannelPeer 解析频道/超级群组的 InputPeer（迁移自 resolver 逻辑）
+func (ahm *AccessHashManager) getChannelPeer(ctx context.Context, channelID int64) (tg.InputPeerClass, error) {
+	// 方法1：优先尝试使用 ChannelsGetChannels
+	channels, err := ahm.api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{ChannelID: channelID, AccessHash: 0},
+	})
+	if err == nil {
+		if chats, ok := channels.(*tg.MessagesChats); ok {
+			for _, c := range chats.Chats {
+				if ch, ok := c.(*tg.Channel); ok && ch.ID == channelID {
+					return &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}, nil
+				}
+			}
+		}
+	}
+
+	// 方法2：从最近对话中查找
+	dialogs, derr := ahm.api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		OffsetDate: 0,
+		OffsetID:   0,
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      100,
+	})
+	if derr == nil {
+		if peer := ahm.searchChannelInDialogs(dialogs, channelID); peer != nil {
+			return peer, nil
+		}
+	}
+
+	// 方法3：尝试获取更多对话
+	if derr == nil {
+		dialogs2, err2 := ahm.api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetDate: 0,
+			OffsetID:   0,
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      500,
+		})
+		if err2 == nil {
+			if peer := ahm.searchChannelInDialogs(dialogs2, channelID); peer != nil {
+				return peer, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("channel not found: %d (tried multiple resolution methods, original errors: channels=%v, dialogs=%v)", channelID, err, derr)
+}
+
+// searchChannelInDialogs 在对话列表中搜索指定的频道
+func (ahm *AccessHashManager) searchChannelInDialogs(dialogs tg.MessagesDialogsClass, channelID int64) tg.InputPeerClass {
+	if ds, ok := dialogs.(*tg.MessagesDialogs); ok {
+		for _, chat := range ds.Chats {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
+				return &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}
+			}
+		}
+	} else if ds, ok := dialogs.(*tg.MessagesDialogsSlice); ok {
+		for _, chat := range ds.Chats {
+			if ch, ok := chat.(*tg.Channel); ok && ch.ID == channelID {
+				return &tg.InputPeerChannel{ChannelID: ch.ID, AccessHash: ch.AccessHash}
+			}
+		}
+	}
 	return nil
 }
