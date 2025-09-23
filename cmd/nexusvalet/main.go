@@ -39,7 +39,7 @@ type Bot struct {
 	currentPeer   tg.InputPeerClass // 存储当前对等体用于回复
 	selfUserID    int64             // 机器人自己的用户ID
 	peerResolver  *peers.Resolver
-	accessHashMgr *plugin.AccessHashManager
+	accessHashMgr *peers.AccessHashManager
 	// 存储最后处理的消息用于编辑上下文
 	lastMessage *tg.Message
 	lastUpdate  interface{} // 存储原始更新
@@ -131,9 +131,9 @@ func (b *Bot) createTelegramClient() error {
 
 	// 初始化 AccessHashManager（优先带数据库持久化）
 	if b.sessionMgr != nil {
-		b.accessHashMgr = plugin.NewAccessHashManagerWithDB(b.api, b.sessionMgr.GetDB())
+		b.accessHashMgr = peers.NewAccessHashManagerWithDB(b.api, b.sessionMgr.GetDB())
 	} else {
-		b.accessHashMgr = plugin.NewAccessHashManager(b.api)
+		b.accessHashMgr = peers.NewAccessHashManager(b.api)
 	}
 
 	// 初始化统一的 Peer 解析器，并注入 AccessHashManager

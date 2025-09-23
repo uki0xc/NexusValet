@@ -317,8 +317,18 @@ func (sp *SBPlugin) banUserInGroupWithError(ctx *command.CommandContext, peer tg
 		return false, fmt.Errorf("不支持的群组类型")
 	}
 
-	// 统一通过 Resolver，带频道上下文回退策略解析用户
-	userPeerGeneric, err := ctx.PeerResolver.ResolveUserInChannel(ctx.Context, channelPeer, uid)
+	// 优先：若为回复消息，从消息中解析用户（最可靠）
+	var userPeerGeneric tg.InputPeerClass
+	var err error
+	if ctx.Message.Message.ReplyTo != nil {
+		if replyTo, ok := ctx.Message.Message.ReplyTo.(*tg.MessageReplyHeader); ok {
+			userPeerGeneric, err = ctx.PeerResolver.ResolveUserFromMessage(ctx.Context, peer, replyTo.ReplyToMsgID, uid)
+		}
+	}
+	// 回退：在频道上下文中解析用户（参与者/搜索）
+	if userPeerGeneric == nil || err != nil {
+		userPeerGeneric, err = ctx.PeerResolver.ResolveUserInChannel(ctx.Context, channelPeer, uid)
+	}
 	if err != nil {
 		return false, fmt.Errorf("解析用户失败: %v", err)
 	}
@@ -409,7 +419,29 @@ func (sp *SBPlugin) deleteUserHistory(ctx *command.CommandContext, peer tg.Input
 
 // getUserInfo 获取用户信息
 func (sp *SBPlugin) getUserInfo(ctx *command.CommandContext, uid int64) (*tg.User, error) {
-	// 尝试通过统一 Resolver 获取用户 peer，再查询完整信息
+	// 优先：如果当前命令是“回复消息”，通过消息上下文直接获取并缓存 access_hash
+	if ctx.Message.Message.ReplyTo != nil {
+		if replyTo, ok := ctx.Message.Message.ReplyTo.(*tg.MessageReplyHeader); ok {
+			// 通过消息解析用户 peer（最稳定）
+			peer, perr := ctx.PeerResolver.ResolveFromChatID(ctx.Context, ctx.Message.ChatID)
+			if perr == nil {
+				if up, uerr := ctx.PeerResolver.ResolveUserFromMessage(ctx.Context, peer, replyTo.ReplyToMsgID, uid); uerr == nil {
+					if iuu, ok := up.(*tg.InputPeerUser); ok {
+						users, gerr := ctx.API.UsersGetUsers(ctx.Context, []tg.InputUserClass{
+							&tg.InputUser{UserID: iuu.UserID, AccessHash: iuu.AccessHash},
+						})
+						if gerr == nil && len(users) > 0 {
+							if user, ok := users[0].(*tg.User); ok {
+								return user, nil
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 回退：通过统一 Resolver 获取用户 peer，再查询完整信息
 	userPeerGeneric, err := ctx.PeerResolver.ResolveFromChatID(ctx.Context, uid)
 	if err != nil {
 		// 回退到仅凭 ID 查询（可能失败于 access_hash 要求）
@@ -589,17 +621,41 @@ func (sp *SBPlugin) sendResponseWithAutoDelete(ctx *command.CommandContext, mess
 			return err
 		}
 
-		// 获取新消息的ID
-		if updates, ok := result.(*tg.Updates); ok {
-			for _, update := range updates.Updates {
-				if msgUpdate, ok := update.(*tg.UpdateNewMessage); ok {
-					if msg, ok := msgUpdate.Message.(*tg.Message); ok {
+		// 获取新消息的ID（支持多种 UpdatesClass）
+		switch up := result.(type) {
+		case *tg.Updates:
+			for _, u := range up.Updates {
+				switch v := u.(type) {
+				case *tg.UpdateNewMessage:
+					if msg, ok := v.Message.(*tg.Message); ok {
 						messageID = msg.ID
 						isNewMessage = true
-						break
+					}
+				case *tg.UpdateNewChannelMessage:
+					if msg, ok := v.Message.(*tg.Message); ok {
+						messageID = msg.ID
+						isNewMessage = true
 					}
 				}
 			}
+		case *tg.UpdatesCombined:
+			for _, u := range up.Updates {
+				switch v := u.(type) {
+				case *tg.UpdateNewMessage:
+					if msg, ok := v.Message.(*tg.Message); ok {
+						messageID = msg.ID
+						isNewMessage = true
+					}
+				case *tg.UpdateNewChannelMessage:
+					if msg, ok := v.Message.(*tg.Message); ok {
+						messageID = msg.ID
+						isNewMessage = true
+					}
+				}
+			}
+		case *tg.UpdateShortSentMessage:
+			messageID = up.ID
+			isNewMessage = true
 		}
 	} else {
 		// 编辑成功，使用原消息ID
@@ -620,25 +676,28 @@ func (sp *SBPlugin) scheduleMessageDeletion(ctx *command.CommandContext, peer tg
 	time.Sleep(time.Duration(seconds) * time.Second)
 
 	var err error
+	// 使用独立的超时上下文，避免命令上下文被取消导致删除失败
+	deleteCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
 	// 根据群组类型选择不同的删除方法
 	switch p := peer.(type) {
 	case *tg.InputPeerChannel:
 		// 超级群组/频道使用ChannelsDeleteMessages
 		channelPeer := &tg.InputChannel{ChannelID: p.ChannelID, AccessHash: p.AccessHash}
-		_, err = ctx.API.ChannelsDeleteMessages(ctx.Context, &tg.ChannelsDeleteMessagesRequest{
+		_, err = ctx.API.ChannelsDeleteMessages(deleteCtx, &tg.ChannelsDeleteMessagesRequest{
 			Channel: channelPeer,
 			ID:      []int{messageID},
 		})
 	case *tg.InputPeerChat:
 		// 普通群组使用MessagesDeleteMessages
-		_, err = ctx.API.MessagesDeleteMessages(ctx.Context, &tg.MessagesDeleteMessagesRequest{
+		_, err = ctx.API.MessagesDeleteMessages(deleteCtx, &tg.MessagesDeleteMessagesRequest{
 			ID:     []int{messageID},
 			Revoke: true, // 对所有人删除
 		})
 	case *tg.InputPeerUser:
 		// 私聊使用MessagesDeleteMessages
-		_, err = ctx.API.MessagesDeleteMessages(ctx.Context, &tg.MessagesDeleteMessagesRequest{
+		_, err = ctx.API.MessagesDeleteMessages(deleteCtx, &tg.MessagesDeleteMessagesRequest{
 			ID:     []int{messageID},
 			Revoke: true, // 对所有人删除
 		})

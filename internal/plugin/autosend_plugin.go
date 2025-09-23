@@ -34,7 +34,7 @@ type AutoSendPlugin struct {
 	db                *sql.DB
 	telegramAPI       *tg.Client
 	peerResolver      *peers.Resolver
-	accessHashManager *AccessHashManager
+	accessHashManager *peers.AccessHashManager
 	tasks             map[int64]*AutoSendTask
 	tasksMutex        sync.RWMutex
 	cronScheduler     *cron.Cron
@@ -98,8 +98,8 @@ func (asp *AutoSendPlugin) Shutdown(ctx context.Context) error {
 func (asp *AutoSendPlugin) SetTelegramClient(client *tg.Client, peerResolver *peers.Resolver) {
 	asp.telegramAPI = client
 	asp.peerResolver = peerResolver
-	// 使用带数据库持久化的AccessHashManager
-	asp.accessHashManager = NewAccessHashManagerWithDB(client, asp.db)
+	// 使用带数据库持久化的AccessHashManager（来自 peers 包）
+	asp.accessHashManager = peers.NewAccessHashManagerWithDB(client, asp.db)
 }
 
 // RegisterCommands 注册命令
@@ -1012,7 +1012,7 @@ func (asp *AutoSendPlugin) handleCheck(ctx *command.CommandContext) error {
 
 				// 如果是用户，检查AccessHash状态
 				if task.ChatID > 0 && asp.accessHashManager != nil {
-					failureCount := asp.accessHashManager.getFailureCount(task.ChatID)
+					failureCount := asp.accessHashManager.FailureCount(task.ChatID)
 					if failureCount > 0 {
 						accessHashStatus = fmt.Sprintf(" (AccessHash失败%d次)", failureCount)
 					}

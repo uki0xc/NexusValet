@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"nexusvalet/internal/command"
+	"nexusvalet/internal/peers"
 	"nexusvalet/pkg/logger"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ var dcCountryMapping = map[int]string{
 type IdsPlugin struct {
 	*BasePlugin
 	telegramAPI       *TelegramAPI
-	accessHashManager *AccessHashManager
+	accessHashManager *peers.AccessHashManager
 }
 
 // NewIdsPlugin 创建ID查询插件
@@ -52,7 +53,7 @@ func NewIdsPlugin() *IdsPlugin {
 // SetTelegramClient 设置Telegram客户端
 func (ip *IdsPlugin) SetTelegramClient(client *tg.Client) {
 	ip.telegramAPI.client = client
-	ip.accessHashManager = NewAccessHashManager(client)
+	ip.accessHashManager = peers.NewAccessHashManager(client)
 }
 
 // estimateLevel 根据用户ID估算等级
@@ -533,7 +534,7 @@ func (ip *IdsPlugin) inferDCFromAccessHash(accessHash int64) int {
 // extractUserFromMessage 从消息中提取用户信息
 func (ip *IdsPlugin) extractUserFromMessage(msg *tg.Message) *tg.User {
 	logger.Debugf("尝试从消息中提取用户信息")
-	
+
 	// 检查消息是否有发送者信息
 	if msg.FromID == nil {
 		logger.Debugf("消息没有FromID")
@@ -548,7 +549,7 @@ func (ip *IdsPlugin) extractUserFromMessage(msg *tg.Message) *tg.User {
 	}
 
 	logger.Debugf("消息来自用户ID: %d", peerUser.UserID)
-	
+
 	// 尝试从AccessHashManager的缓存中获取用户信息
 	if userInfo := ip.accessHashManager.GetCachedUserInfo(peerUser.UserID); userInfo != nil {
 		logger.Debugf("从缓存中找到用户信息: %d", peerUser.UserID)
@@ -562,7 +563,7 @@ func (ip *IdsPlugin) extractUserFromMessage(msg *tg.Message) *tg.User {
 		}
 		return user
 	}
-	
+
 	logger.Debugf("缓存中未找到用户信息: %d", peerUser.UserID)
 	return nil
 }
